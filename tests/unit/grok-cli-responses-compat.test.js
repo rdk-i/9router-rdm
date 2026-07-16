@@ -86,7 +86,6 @@ describe("Grok CLI Responses compatibility", () => {
         content: [
           { type: "output_text", text: "answer", annotations: [{ type: "url_citation" }] },
           { type: "input_image", image_url: "data:image/png;base64,AA==", detail: "high" },
-          { type: "unknown", text: "drop" },
         ],
         internal_chat_message_metadata_passthrough: { turn_id: "foreign" },
       }],
@@ -142,6 +141,23 @@ describe("Grok CLI Responses compatibility", () => {
       expect(error.path).toBe("input[0]");
       expect(error.message).toContain("future_semantic_item");
     }
+  });
+
+  it("rejects unknown message roles and nested semantic content", () => {
+    expect(() => translate({
+      input: [{ type: "message", role: "future_role", content: "secret" }],
+    })).toThrowError(expect.objectContaining({ path: "input[0].role" }));
+
+    expect(() => translate({
+      input: [{
+        type: "message",
+        role: "user",
+        content: [
+          { type: "input_text", text: "keep" },
+          { type: "input_file", file_id: "file_private" },
+        ],
+      }],
+    })).toThrowError(expect.objectContaining({ path: "input[0].content[1]" }));
   });
 
   it("preserves native reasoning and x-search history while dropping foreign ciphertext", () => {
@@ -335,6 +351,22 @@ describe("Grok CLI Responses compatibility", () => {
       { type: "message", role: "user", content: "continue" },
     ]);
     expect(diagnostics.repairedHistory).toBe(2);
+  });
+
+  it("keeps one call for duplicate call ids", () => {
+    const { body, diagnostics } = translate({
+      input: [
+        { type: "function_call", call_id: "call-dup", name: "first", arguments: "{}" },
+        { type: "function_call", call_id: "call-dup", name: "second", arguments: "{}" },
+        { type: "function_call_output", call_id: "call-dup", output: "result" },
+      ],
+    });
+
+    expect(body.input).toEqual([
+      { type: "function_call", call_id: "call-dup", name: "first", arguments: "{}" },
+      { type: "function_call_output", call_id: "call-dup", output: "result" },
+    ]);
+    expect(diagnostics.repairedHistory).toBe(1);
   });
 
   it("preserves source-backed backend tool history", () => {

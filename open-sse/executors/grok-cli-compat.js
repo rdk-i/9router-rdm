@@ -38,38 +38,60 @@ export class GrokCliCompatibilityError extends Error {
   }
 }
 
-function normalizeMessageContent(content) {
+function normalizeMessageContent(content, path) {
   if (typeof content === "string") return content.length ? content : null;
-  if (!Array.isArray(content)) return null;
+  if (content == null) return null;
+  if (!Array.isArray(content)) {
+    throw new GrokCliCompatibilityError("Unsupported Grok CLI message content", path);
+  }
 
-  const normalized = content.flatMap((part) => {
-    if (!part || typeof part !== "object" || Array.isArray(part)) return [];
+  const normalized = [];
+  for (let index = 0; index < content.length; index += 1) {
+    const part = content[index];
+    const partPath = `${path}[${index}]`;
+    if (!part || typeof part !== "object" || Array.isArray(part)) {
+      throw new GrokCliCompatibilityError("Unsupported Grok CLI message content", partPath);
+    }
     if (
       ["input_text", "output_text", "text"].includes(part.type)
-      && typeof part.text === "string"
-      && part.text.length
     ) {
-      return [{ type: "input_text", text: part.text }];
+      if (typeof part.text !== "string") {
+        throw new GrokCliCompatibilityError("Grok CLI message text must be a string", partPath);
+      }
+      if (part.text.length) normalized.push({ type: "input_text", text: part.text });
+      continue;
     }
-    if (part.type !== "input_image") return [];
+    if (part.type !== "input_image") {
+      throw new GrokCliCompatibilityError(
+        `Unsupported Grok CLI message content type: ${part.type || "<missing>"}`,
+        partPath,
+      );
+    }
 
     const image = { type: "input_image" };
     if (typeof part.image_url === "string" && part.image_url) image.image_url = part.image_url;
     if (typeof part.file_id === "string" && part.file_id) image.file_id = part.file_id;
-    if (!image.image_url && !image.file_id) return [];
+    if (!image.image_url && !image.file_id) {
+      throw new GrokCliCompatibilityError("Grok CLI input image requires image_url or file_id", partPath);
+    }
     if (["auto", "low", "high"].includes(part.detail)) image.detail = part.detail;
-    return [image];
-  });
+    normalized.push(image);
+  }
 
   return normalized.length ? normalized : null;
 }
 
-function normalizeMessage(item) {
+function normalizeMessage(item, path) {
   const rawRole = typeof item.role === "string" ? item.role.trim().toLowerCase() : "";
   const role = rawRole === "developer" ? "system" : rawRole;
-  if (!MESSAGE_ROLES.has(role)) return null;
+  if (!MESSAGE_ROLES.has(role)) {
+    throw new GrokCliCompatibilityError(
+      `Unsupported Grok CLI message role: ${rawRole || "<missing>"}`,
+      `${path}.role`,
+    );
+  }
 
-  const content = normalizeMessageContent(item.content);
+  const content = normalizeMessageContent(item.content, `${path}.content`);
   if (content === null) return null;
   return { type: "message", role, content };
 }
@@ -238,6 +260,10 @@ function repairFunctionSegment(segment, diagnostics) {
   for (let index = 0; index < segment.length; index += 1) {
     const item = segment[index];
     if (item.type === "function_call") {
+      if (calls.get(item.call_id) !== item) {
+        diagnostics.repairedHistory += 1;
+        continue;
+      }
       repaired.push(item);
       continue;
     }
@@ -280,7 +306,7 @@ function repairFunctionHistory(items, diagnostics) {
 function normalizeInputItem(item, index, diagnostics) {
   const type = item.type || (item.role ? "message" : "");
   const path = `input[${index}]`;
-  if (type === "message") return normalizeMessage(item);
+  if (type === "message") return normalizeMessage(item, path);
   if (type === "reasoning") return normalizeReasoning(item, diagnostics);
   if (type === "function_call") return normalizeFunctionCall(item, path);
   if (["function_call_output", "custom_tool_call_output"].includes(type)) {

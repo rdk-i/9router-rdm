@@ -17,6 +17,46 @@ function modelEntries(data) {
   return [];
 }
 
+function firstValid(item, meta, keys, normalize) {
+  for (const source of [item, meta]) {
+    if (!source) continue;
+    for (const key of keys) {
+      if (!(key in source)) continue;
+      const value = normalize(source[key]);
+      if (value !== undefined) return value;
+    }
+  }
+  return undefined;
+}
+
+function nonEmptyString(value) {
+  if (typeof value !== "string" || !value.trim()) return undefined;
+  return value.trim();
+}
+
+function positiveNumber(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : undefined;
+}
+
+function booleanValue(value) {
+  return typeof value === "boolean" ? value : undefined;
+}
+
+function arrayValue(value) {
+  return Array.isArray(value) ? structuredClone(value) : undefined;
+}
+
+function compactionValue(value) {
+  if (typeof value === "boolean") return value;
+  return Number.isInteger(value) && value >= 0 ? value : undefined;
+}
+
+function assignCapability(model, item, meta, key, aliases, normalize) {
+  const value = firstValid(item, meta, aliases, normalize);
+  if (value !== undefined) model[key] = value;
+}
+
 export function parseGrokCliModels(data) {
   const seen = new Set();
   const models = [];
@@ -24,8 +64,12 @@ export function parseGrokCliModels(data) {
   for (const [key, raw] of modelEntries(data)) {
     const item = typeof raw === "string" ? { id: raw } : raw;
     if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const meta = item._meta && typeof item._meta === "object" && !Array.isArray(item._meta)
+      ? item._meta
+      : null;
     const id = String(
-      item.id ?? item.model_id ?? item.modelId ?? item.model ?? item.slug ?? key ?? item.name ?? "",
+      item.model ?? item.model_id ?? item.modelId ?? item.id ?? item.slug
+        ?? meta?.model ?? meta?.modelId ?? key ?? item.name ?? "",
     ).trim();
     if (!id || seen.has(id)) continue;
     seen.add(id);
@@ -35,15 +79,82 @@ export function parseGrokCliModels(data) {
       id,
       name: item.display_name ?? item.displayName ?? item.name ?? id,
     };
-    const contextLength = Number(
-      item.context_length ?? item.contextLength ?? item.context_window ?? item.contextWindow,
+    assignCapability(model, item, meta, "apiBackend", ["apiBackend", "api_backend"], nonEmptyString);
+    assignCapability(
+      model,
+      item,
+      meta,
+      "contextWindow",
+      ["contextWindow", "context_window", "contextLength", "context_length", "totalContextTokens"],
+      positiveNumber,
     );
-    const maxOutputTokens = Number(item.max_output_tokens ?? item.maxOutputTokens);
-    if (Number.isFinite(contextLength) && contextLength > 0) model.contextLength = contextLength;
-    if (Number.isFinite(maxOutputTokens) && maxOutputTokens > 0) {
-      model.maxOutputTokens = maxOutputTokens;
-    }
+    if (model.contextWindow) model.contextLength = model.contextWindow;
+    assignCapability(
+      model,
+      item,
+      meta,
+      "maxOutputTokens",
+      ["maxOutputTokens", "max_output_tokens", "maxCompletionTokens", "max_completion_tokens"],
+      positiveNumber,
+    );
+    assignCapability(
+      model,
+      item,
+      meta,
+      "supportsBackendSearch",
+      ["supportsBackendSearch", "supports_backend_search"],
+      booleanValue,
+    );
+    assignCapability(
+      model,
+      item,
+      meta,
+      "supportsReasoningEffort",
+      ["supportsReasoningEffort", "supports_reasoning_effort"],
+      booleanValue,
+    );
+    assignCapability(
+      model,
+      item,
+      meta,
+      "reasoningEffort",
+      ["reasoningEffort", "reasoning_effort"],
+      nonEmptyString,
+    );
+    assignCapability(
+      model,
+      item,
+      meta,
+      "reasoningEfforts",
+      ["reasoningEfforts", "reasoning_efforts"],
+      arrayValue,
+    );
+    assignCapability(
+      model,
+      item,
+      meta,
+      "compactionAtTokens",
+      ["compactionAtTokens", "compaction_at_tokens"],
+      compactionValue,
+    );
+    assignCapability(
+      model,
+      item,
+      meta,
+      "compactionsRemaining",
+      ["compactionsRemaining", "compactions_remaining"],
+      compactionValue,
+    );
+    assignCapability(
+      model,
+      item,
+      meta,
+      "streamToolCalls",
+      ["streamToolCalls", "stream_tool_calls"],
+      booleanValue,
+    );
     if (id === GROK_CLI_MODEL) {
+      model.contextWindow ||= 500000;
       model.contextLength ||= 500000;
       model.maxOutputTokens ||= 64000;
     }

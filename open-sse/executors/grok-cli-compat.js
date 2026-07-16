@@ -12,12 +12,22 @@ const KNOWN_TOP_LEVEL = new Set([
   "temperature",
   "top_p",
   "parallel_tool_calls",
+  "stream",
+  "store",
 ]);
 
 const MESSAGE_ROLES = new Set(["system", "user", "assistant"]);
 const NATIVE_REASONING_ID = /^rs_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const FUNCTION_HISTORY_TYPES = new Set(["function_call", "function_call_output"]);
 const INTERNAL_HISTORY_FIELDS = new Set(["internal_chat_message_metadata_passthrough"]);
+const HOSTED_TOOL_TYPES = new Set(["web_search", "x_search"]);
+const TOOL_CHOICE_MODES = new Set(["auto", "none", "required"]);
+const EFFORT_LEVELS = new Set(["low", "medium", "high", "xhigh"]);
+const FREEFORM_TOOL_PARAMETERS = {
+  type: "object",
+  properties: { input: { type: "string" } },
+  required: ["input"],
+};
 
 export class GrokCliCompatibilityError extends Error {
   constructor(message, path = null) {
@@ -310,6 +320,138 @@ function validNumber(value) {
   return typeof value === "number" && Number.isFinite(value);
 }
 
+export function normalizeGrokCliEffort(value) {
+  const effort = typeof value === "string" ? value.trim().toLowerCase() : "";
+  if (effort === "max") return "xhigh";
+  return EFFORT_LEVELS.has(effort) ? effort : "high";
+}
+
+function normalizeFunctionTool(tool, custom = false) {
+  const nested = tool.function && typeof tool.function === "object" && !Array.isArray(tool.function)
+    ? tool.function
+    : null;
+  const rawName = typeof tool.name === "string" ? tool.name : nested?.name;
+  const name = typeof rawName === "string" ? rawName.trim().slice(0, 128) : "";
+  if (!name) return null;
+
+  const rawDescription = typeof tool.description === "string"
+    ? tool.description
+    : nested?.description;
+  const rawParameters = tool.parameters && typeof tool.parameters === "object" && !Array.isArray(tool.parameters)
+    ? tool.parameters
+    : nested?.parameters;
+  const rawStrict = typeof tool.strict === "boolean" ? tool.strict : nested?.strict;
+  const normalized = {
+    type: "function",
+    name,
+  };
+  if (typeof rawDescription === "string" && rawDescription) {
+    normalized.description = rawDescription;
+  }
+  normalized.parameters = custom
+    ? structuredClone(FREEFORM_TOOL_PARAMETERS)
+    : rawParameters && typeof rawParameters === "object" && !Array.isArray(rawParameters)
+      ? structuredClone(rawParameters)
+      : { type: "object", properties: {} };
+  if (!custom && typeof rawStrict === "boolean") normalized.strict = rawStrict;
+  return normalized;
+}
+
+function normalizeWebSearchTool(tool) {
+  const domains = Array.isArray(tool.filters?.allowed_domains)
+    ? [...new Set(tool.filters.allowed_domains
+      .filter((domain) => typeof domain === "string")
+      .map((domain) => domain.trim())
+      .filter(Boolean))]
+    : [];
+  return domains.length
+    ? { type: "web_search", filters: { allowed_domains: domains } }
+    : { type: "web_search" };
+}
+
+function normalizeTools(source, diagnostics) {
+  if (!Array.isArray(source)) return [];
+
+  const functions = [];
+  const hosted = [];
+  const seenHosted = new Set();
+  for (const tool of source) {
+    if (!tool || typeof tool !== "object" || Array.isArray(tool)) {
+      diagnostics.droppedToolTypes.push("<invalid>");
+      continue;
+    }
+    const type = typeof tool.type === "string" ? tool.type : "";
+    if (HOSTED_TOOL_TYPES.has(type)) {
+      if (seenHosted.has(type)) {
+        diagnostics.droppedToolTypes.push(type);
+        continue;
+      }
+      seenHosted.add(type);
+      hosted.push(type === "web_search" ? normalizeWebSearchTool(tool) : { type: "x_search" });
+      continue;
+    }
+
+    const custom = type === "custom";
+    const functionLike = type === "function" || custom || (!type && (tool.name || tool.function));
+    if (!functionLike) {
+      diagnostics.droppedToolTypes.push(type || "<missing>");
+      continue;
+    }
+    const normalized = normalizeFunctionTool(tool, custom);
+    if (!normalized) {
+      diagnostics.droppedToolTypes.push(type || "function");
+      continue;
+    }
+    if (custom) diagnostics.convertedCustomTools += 1;
+    functions.push(normalized);
+  }
+
+  const hostedNames = new Set(hosted.map((tool) => tool.type));
+  const retainedFunctions = functions.filter((tool) => {
+    if (!hostedNames.has(tool.name)) return true;
+    diagnostics.droppedToolTypes.push(`function:${tool.name}`);
+    return false;
+  });
+  return [...retainedFunctions, ...hosted];
+}
+
+function normalizeToolChoice(choice, tools) {
+  if (!tools.length) return undefined;
+  if (typeof choice === "string") {
+    return TOOL_CHOICE_MODES.has(choice) ? choice : undefined;
+  }
+  if (!choice || typeof choice !== "object" || Array.isArray(choice)) return undefined;
+  if (!["function", "custom"].includes(choice.type)) return undefined;
+
+  const rawName = choice.name ?? choice.function?.name;
+  const name = typeof rawName === "string" ? rawName.trim().slice(0, 128) : "";
+  const functionNames = new Set(
+    tools.filter((tool) => tool.type === "function").map((tool) => tool.name),
+  );
+  return name && functionNames.has(name) ? { type: "function", name } : undefined;
+}
+
+function normalizeText(text) {
+  const format = text?.format;
+  if (!format || typeof format !== "object" || Array.isArray(format)) return undefined;
+  if (format.type === "text") return { format: { type: "text" } };
+  if (format.type !== "json_schema" || format.schema === undefined) return undefined;
+
+  const name = typeof format.name === "string" && format.name.trim()
+    ? format.name.trim()
+    : "structured_output";
+  const normalized = {
+    type: "json_schema",
+    name,
+    schema: structuredClone(format.schema),
+    strict: typeof format.strict === "boolean" ? format.strict : true,
+  };
+  if (typeof format.description === "string" && format.description) {
+    normalized.description = format.description;
+  }
+  return { format: normalized };
+}
+
 export function translateGrokCliResponsesRequest(source = {}, options = {}) {
   if (!source || typeof source !== "object" || Array.isArray(source)) {
     throw new GrokCliCompatibilityError("Grok CLI request body must be an object", "body");
@@ -341,6 +483,21 @@ export function translateGrokCliResponsesRequest(source = {}, options = {}) {
   if (typeof source.parallel_tool_calls === "boolean") {
     providerBody.parallel_tool_calls = source.parallel_tool_calls;
   }
+  const tools = normalizeTools(source.tools, diagnostics);
+  if (tools.length) providerBody.tools = tools;
+  const toolChoice = normalizeToolChoice(source.tool_choice, tools);
+  if (toolChoice !== undefined) providerBody.tool_choice = toolChoice;
+
+  providerBody.reasoning = { summary: "concise" };
+  if (options.supportsReasoningEffort) {
+    providerBody.reasoning.effort = normalizeGrokCliEffort(
+      source.reasoning?.effort ?? source.reasoning_effort,
+    );
+  }
+  providerBody.include = ["reasoning.encrypted_content"];
+
+  const text = normalizeText(source.text);
+  if (text) providerBody.text = text;
   providerBody.stream = true;
   providerBody.store = false;
 

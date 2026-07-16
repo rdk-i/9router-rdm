@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   GrokCliCompatibilityError,
+  normalizeGrokCliEffort,
   translateGrokCliResponsesRequest,
 } from "../../open-sse/executors/grok-cli-compat.js";
 
@@ -47,6 +48,8 @@ describe("Grok CLI Responses compatibility", () => {
       temperature: 0.2,
       top_p: 0.8,
       parallel_tool_calls: false,
+      reasoning: { summary: "concise", effort: "high" },
+      include: ["reasoning.encrypted_content"],
       stream: true,
       store: false,
     });
@@ -350,5 +353,170 @@ describe("Grok CLI Responses compatibility", () => {
         outputs: [],
       },
     ]);
+  });
+
+  it("rebuilds source-backed tools and resolves hosted collisions", () => {
+    const { body, diagnostics } = translate({
+      input: "search",
+      tools: [
+        {
+          type: "web_search",
+          filters: { allowed_domains: [" x.com ", "", 7, "x.com"] },
+          external_web_access: true,
+          search_context_size: "high",
+        },
+        { type: "web_search", filters: { allowed_domains: ["ignored.example"] } },
+        { type: "x_search", unsupported: true },
+        { type: "x_search" },
+        { type: "web_search_preview" },
+        { type: "file_search" },
+        {
+          type: "function",
+          name: "web_search",
+          description: "collision",
+          parameters: { type: "object" },
+        },
+        {
+          type: "function",
+          function: {
+            name: "read_file",
+            description: "Read file",
+            parameters: { type: "object", properties: { path: { type: "string" } } },
+            strict: true,
+          },
+          unsupported: "drop",
+        },
+        { type: "custom", name: "exec", description: "Run command", format: { type: "text" } },
+      ],
+    });
+
+    expect(body.tools).toEqual([
+      {
+        type: "function",
+        name: "read_file",
+        description: "Read file",
+        parameters: { type: "object", properties: { path: { type: "string" } } },
+        strict: true,
+      },
+      {
+        type: "function",
+        name: "exec",
+        description: "Run command",
+        parameters: {
+          type: "object",
+          properties: { input: { type: "string" } },
+          required: ["input"],
+        },
+      },
+      { type: "web_search", filters: { allowed_domains: ["x.com"] } },
+      { type: "x_search" },
+    ]);
+    expect(diagnostics.convertedCustomTools).toBe(1);
+    expect(diagnostics.droppedToolTypes).toEqual(expect.arrayContaining([
+      "web_search",
+      "x_search",
+      "web_search_preview",
+      "file_search",
+      "function:web_search",
+    ]));
+  });
+
+  it("normalizes tool choice against final tools", () => {
+    const tools = [
+      { type: "function", name: "read_file", parameters: { type: "object" } },
+      { type: "custom", name: "exec" },
+      { type: "web_search" },
+    ];
+
+    expect(translate({ input: "x", tools, tool_choice: "required" }).body.tool_choice)
+      .toBe("required");
+    expect(translate({
+      input: "x",
+      tools,
+      tool_choice: { type: "custom", name: "exec" },
+    }).body.tool_choice).toEqual({ type: "function", name: "exec" });
+    expect(translate({
+      input: "x",
+      tools,
+      tool_choice: { type: "function", function: { name: "read_file" } },
+    }).body.tool_choice).toEqual({ type: "function", name: "read_file" });
+    expect(translate({
+      input: "x",
+      tools,
+      tool_choice: { type: "web_search" },
+    }).body.tool_choice).toBeUndefined();
+    expect(translate({ input: "x", tools, tool_choice: { type: "function", name: "stale" } })
+      .body.tool_choice).toBeUndefined();
+    expect(translate({ input: "x", tool_choice: "auto" }).body.tool_choice).toBeUndefined();
+  });
+
+  it("normalizes reasoning effort only for proven models", () => {
+    expect(normalizeGrokCliEffort("low")).toBe("low");
+    expect(normalizeGrokCliEffort("MAX")).toBe("xhigh");
+    expect(normalizeGrokCliEffort("ultra")).toBe("high");
+
+    const supported = translate({
+      input: "x",
+      reasoning: { effort: "max", summary: "detailed", generate_summary: true },
+      include: ["file_search_call.results", "reasoning.encrypted_content"],
+    }).body;
+    expect(supported.reasoning).toEqual({ effort: "xhigh", summary: "concise" });
+    expect(supported.include).toEqual(["reasoning.encrypted_content"]);
+
+    const unsupported = translate({
+      input: "x",
+      reasoning_effort: "max",
+    }, { model: "grok-build", supportsReasoningEffort: false }).body;
+    expect(unsupported.reasoning).toEqual({ summary: "concise" });
+    expect(unsupported.include).toEqual(["reasoning.encrypted_content"]);
+  });
+
+  it("rebuilds plain text and JSON schema output configuration", () => {
+    expect(translate({
+      input: "x",
+      text: { format: { type: "text" }, verbosity: "high" },
+    }).body.text).toEqual({ format: { type: "text" } });
+
+    expect(translate({
+      input: "x",
+      text: {
+        verbosity: "low",
+        format: {
+          type: "json_schema",
+          name: " result ",
+          description: "Result object",
+          schema: { type: "object", properties: { ok: { type: "boolean" } } },
+          strict: false,
+          extra: "drop",
+        },
+      },
+    }).body.text).toEqual({
+      format: {
+        type: "json_schema",
+        name: "result",
+        description: "Result object",
+        schema: { type: "object", properties: { ok: { type: "boolean" } } },
+        strict: false,
+      },
+    });
+
+    expect(translate({ input: "x", text: { format: { type: "json_object" } } }).body.text)
+      .toBeUndefined();
+  });
+
+  it("produces stable output when translated twice", () => {
+    const first = translate({
+      model: "grok-4.5",
+      input: [{ type: "message", role: "user", content: "search" }],
+      tools: [
+        { type: "custom", name: "exec" },
+        { type: "x_search", metadata: "drop" },
+      ],
+      tool_choice: { type: "custom", name: "exec" },
+      reasoning: { effort: "max" },
+      text: { format: { type: "text" }, verbosity: "low" },
+    }).body;
+
+    expect(translate(first).body).toEqual(first);
   });
 });

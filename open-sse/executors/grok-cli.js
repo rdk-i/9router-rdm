@@ -117,6 +117,30 @@ function resolveGrokCliRequestId(requestKey) {
   return requestId;
 }
 
+function deterministicAgentId(seed) {
+  const chars = crypto.createHash("sha256").update(seed).digest("hex").slice(0, 32).split("");
+  chars[12] = "5";
+  chars[16] = ["8", "9", "a", "b"][Number.parseInt(chars[16], 16) % 4];
+  const hex = chars.join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+async function resolveGrokCliAgentId(credentials) {
+  const psd = credentials?.providerSpecificData || {};
+  const stored = psd.deviceId || psd.agentId;
+  if (stored) return stored;
+
+  const accountId = credentials?.connectionId || credentials?.id
+    || psd.userId || psd.principalId || credentials?.userId || credentials?.providerUserId
+    || psd.email || credentials?.email || "anonymous";
+  try {
+    const machineId = await getConsistentMachineId("grok-cli-agent");
+    return deterministicAgentId(`${machineId}\0${accountId}`);
+  } catch {
+    return crypto.randomUUID();
+  }
+}
+
 function resolveEffortFromModel(modelId) {
   if (!modelId || typeof modelId !== "string") return null;
   for (const level of EFFORT_LEVELS) {
@@ -136,7 +160,6 @@ export class GrokCliExecutor extends BaseExecutor {
     this._currentReqId = null;
     this._currentTurnIdx = 1;
     this._agentId = null;
-    this._defaultAgentId = null;
   }
 
   buildUrl() {
@@ -266,30 +289,18 @@ export class GrokCliExecutor extends BaseExecutor {
   }
 
   async execute(args) {
-    const credentialAgentId = args.credentials?.providerSpecificData?.deviceId
-      || args.credentials?.providerSpecificData?.agentId;
-    if (credentialAgentId) {
-      this._agentId = credentialAgentId;
-    } else {
-      if (!this._defaultAgentId) {
-        try {
-          const mid = await getConsistentMachineId("grok-cli-agent");
-          this._defaultAgentId = [
-            mid.slice(0, 8),
-            mid.slice(8, 12),
-            "5" + mid.slice(13, 16),
-            "a" + mid.slice(17, 20),
-            mid.slice(0, 12).padEnd(12, "0"),
-          ].join("-");
-        } catch {
-          this._defaultAgentId = crypto.randomUUID();
-        }
-      }
-      this._agentId = this._defaultAgentId;
-    }
+    const agentId = await resolveGrokCliAgentId(args.credentials);
+    this._agentId = agentId;
+    const credentials = {
+      ...(args.credentials || {}),
+      providerSpecificData: {
+        ...(args.credentials?.providerSpecificData || {}),
+        agentId,
+      },
+    };
 
     try {
-      return await super.execute(args);
+      return await super.execute({ ...args, credentials });
     } catch (error) {
       if (!(error instanceof GrokCliCompatibilityError)) throw error;
       const response = new Response(JSON.stringify({
@@ -305,7 +316,7 @@ export class GrokCliExecutor extends BaseExecutor {
       });
       return {
         response,
-        url: this.buildUrl(args.model, args.stream, 0, args.credentials),
+        url: this.buildUrl(args.model, args.stream, 0, credentials),
         headers: {},
         transformedBody: args.body,
       };

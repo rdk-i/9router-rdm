@@ -1,4 +1,9 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
+vi.mock("../../open-sse/utils/proxyFetch.js", () => ({
+  proxyAwareFetch: vi.fn(),
+}));
+
+import { proxyAwareFetch } from "../../open-sse/utils/proxyFetch.js";
 import {
   GrokCliExecutor,
   countGrokCliUserTurns,
@@ -65,6 +70,7 @@ describe("GrokCliExecutor", () => {
   let executor;
 
   beforeEach(() => {
+    vi.clearAllMocks();
     _resetGrokCliTurnStore();
     executor = new GrokCliExecutor();
   });
@@ -506,7 +512,6 @@ describe("GrokCliExecutor", () => {
   });
 
   it("does not reuse a credential agent id for another account", async () => {
-    executor._defaultAgentId = "machine-default";
     const invalidBody = { input: [{ type: "future_semantic_item" }] };
 
     await executor.execute({
@@ -523,7 +528,53 @@ describe("GrokCliExecutor", () => {
       stream: true,
       credentials: { connectionId: "account-b", providerSpecificData: {} },
     });
-    expect(executor._agentId).toBe("machine-default");
+    expect(executor._agentId).not.toBe("account-a-agent");
+    expect(executor._agentId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
+  });
+
+  it("isolates generated agent ids across accounts and retries", async () => {
+    executor.config = {
+      ...executor.config,
+      retry: { ...executor.config.retry, 502: { attempts: 1, delayMs: 0 } },
+    };
+    const seenHeaders = [];
+    let releaseFirst;
+    let markFirstStarted;
+    const firstStarted = new Promise((resolve) => { markFirstStarted = resolve; });
+    const firstGate = new Promise((resolve) => { releaseFirst = resolve; });
+    proxyAwareFetch.mockImplementation(async (_url, options) => {
+      seenHeaders.push(options.headers);
+      if (seenHeaders.length === 1) {
+        markFirstStarted();
+        await firstGate;
+        return new Response("retry", { status: 502 });
+      }
+      return new Response("ok", { status: 200 });
+    });
+
+    const accountA = executor.execute({
+      model: "grok-4.5",
+      body: { input: "account a" },
+      stream: true,
+      credentials: { accessToken: "token-a", connectionId: "account-a" },
+    });
+    await firstStarted;
+    await executor.execute({
+      model: "grok-4.5",
+      body: { input: "account b" },
+      stream: true,
+      credentials: { accessToken: "token-b", connectionId: "account-b" },
+    });
+    releaseFirst();
+    await accountA;
+
+    const ids = seenHeaders.map((headers) => headers["x-grok-agent-id"]);
+    expect(ids).toHaveLength(3);
+    expect(ids[0]).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    expect(ids[0]).not.toBe(ids[1]);
+    expect(ids[2]).toBe(ids[0]);
   });
 
   it("throws compatibility errors from direct transforms", () => {

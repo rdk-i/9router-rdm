@@ -121,4 +121,234 @@ describe("Grok CLI Responses compatibility", () => {
       expect(error.message).toContain("future_semantic_item");
     }
   });
+
+  it("preserves native reasoning and x-search history while dropping foreign ciphertext", () => {
+    const responseId = "144f7ee6-7881-9c5b-8bc5-ce10354424af";
+    const reasoningId = `rs_${responseId}`;
+    const tcoId = `tco_${responseId}_call-1`;
+    const { body, diagnostics } = translate({
+      input: [
+        { type: "message", role: "user", content: "search" },
+        {
+          type: "reasoning",
+          id: "rs_07fe505b3114f180016a5698411c448191bdcdcba678464461",
+          encrypted_content: "openai-ciphertext",
+          summary: [],
+        },
+        {
+          type: "reasoning",
+          id: "tco_foreign_call-1",
+          encrypted_content: "different-id_ciphertext",
+          summary: [],
+        },
+        {
+          type: "reasoning",
+          id: reasoningId,
+          status: "completed",
+          encrypted_content: "grok-ciphertext",
+          summary: [{ type: "summary_text", text: "before search" }],
+          content: [{ text: "private reasoning" }],
+        },
+        {
+          type: "custom_tool_call",
+          id: `ctc_${responseId}_call-1`,
+          call_id: "xs_call-1",
+          name: "x_user_search",
+          input: "{\"query\":\"OpenAI\"}",
+          status: "completed",
+          internal_chat_message_metadata_passthrough: { turn_id: "drop" },
+        },
+        {
+          type: "reasoning",
+          id: tcoId,
+          status: "completed",
+          encrypted_content: `${tcoId}_ciphertext`,
+          summary: [],
+        },
+        { type: "message", role: "assistant", content: "done" },
+      ],
+    });
+
+    expect(body.input).toEqual([
+      { type: "message", role: "user", content: "search" },
+      {
+        type: "reasoning",
+        id: reasoningId,
+        encrypted_content: "grok-ciphertext",
+        summary: [{ type: "summary_text", text: "before search" }],
+        content: [{ type: "reasoning_text", text: "private reasoning" }],
+      },
+      {
+        type: "custom_tool_call",
+        id: `ctc_${responseId}_call-1`,
+        call_id: "xs_call-1",
+        name: "x_user_search",
+        input: "{\"query\":\"OpenAI\"}",
+        status: "completed",
+      },
+      {
+        type: "reasoning",
+        id: tcoId,
+        encrypted_content: `${tcoId}_ciphertext`,
+        summary: [],
+      },
+      { type: "message", role: "assistant", content: "done" },
+    ]);
+    expect(diagnostics.droppedInputTypes).toEqual(["reasoning", "reasoning"]);
+  });
+
+  it("normalizes function and Codex custom history without losing typed output", () => {
+    const { body } = translate({
+      input: [
+        {
+          type: "function_call",
+          id: "fc_native-output-id",
+          call_id: "call-function",
+          name: "read_image",
+          arguments: "{broken",
+          status: "completed",
+        },
+        {
+          type: "function_call_output",
+          id: "fco_output-id",
+          call_id: "call-function",
+          status: "completed",
+          output: [
+            { type: "input_text", text: "image result" },
+            { type: "input_image", image_url: "data:image/png;base64,AA==", detail: "auto" },
+          ],
+        },
+        {
+          type: "custom_tool_call",
+          id: "ctc_openai",
+          call_id: "call-custom",
+          name: "exec",
+          input: "pwd",
+          status: "completed",
+        },
+        {
+          type: "custom_tool_call_output",
+          call_id: "call-custom",
+          output: null,
+        },
+        {
+          type: "function_call",
+          call_id: "call-structured",
+          name: "structured",
+          arguments: { z: 1 },
+        },
+        {
+          type: "function_call_output",
+          call_id: "call-structured",
+          output: { ok: true, count: 2 },
+        },
+        { type: "function_call_output", call_id: "call-orphan", output: "orphan" },
+      ],
+    });
+
+    expect(body.input).toEqual([
+      { type: "function_call", call_id: "call-function", name: "read_image", arguments: "{}" },
+      {
+        type: "function_call_output",
+        call_id: "call-function",
+        output: [
+          { type: "input_text", text: "image result" },
+          { type: "input_image", image_url: "data:image/png;base64,AA==", detail: "auto" },
+        ],
+      },
+      {
+        type: "function_call",
+        call_id: "call-custom",
+        name: "exec",
+        arguments: "{\"input\":\"pwd\"}",
+      },
+      { type: "function_call_output", call_id: "call-custom", output: "null" },
+      {
+        type: "function_call",
+        call_id: "call-structured",
+        name: "structured",
+        arguments: "{\"z\":1}",
+      },
+      {
+        type: "function_call_output",
+        call_id: "call-structured",
+        output: "{\"ok\":true,\"count\":2}",
+      },
+    ]);
+  });
+
+  it("rejects malformed function calls before provider transport", () => {
+    expect(() => translate({
+      input: [{ type: "function_call", call_id: "call-1", arguments: "{}" }],
+    })).toThrowError(GrokCliCompatibilityError);
+
+    try {
+      translate({ input: [{ type: "function_call", call_id: "call-1", arguments: "{}" }] });
+    } catch (error) {
+      expect(error.path).toBe("input[0]");
+      expect(error.message).toContain("name");
+    }
+  });
+
+  it("keeps last duplicate result and repairs dangling historical calls", () => {
+    const { body, diagnostics } = translate({
+      input: [
+        { type: "function_call", call_id: "call-dup", name: "dup", arguments: "{}" },
+        { type: "function_call_output", call_id: "call-dup", output: "old" },
+        { type: "function_call_output", call_id: "call-dup", output: "new" },
+        { type: "function_call", call_id: "call-missing", name: "missing", arguments: "{}" },
+        { type: "message", role: "user", content: "continue" },
+      ],
+    });
+
+    expect(body.input).toEqual([
+      { type: "function_call", call_id: "call-dup", name: "dup", arguments: "{}" },
+      { type: "function_call_output", call_id: "call-dup", output: "new" },
+      { type: "function_call", call_id: "call-missing", name: "missing", arguments: "{}" },
+      {
+        type: "function_call_output",
+        call_id: "call-missing",
+        output: "Tool execution was cancelled by the user (tool `missing` was not executed).",
+      },
+      { type: "message", role: "user", content: "continue" },
+    ]);
+    expect(diagnostics.repairedHistory).toBe(2);
+  });
+
+  it("preserves source-backed backend tool history", () => {
+    const { body } = translate({
+      input: [
+        {
+          type: "web_search_call",
+          id: "ws_1",
+          status: "completed",
+          action: { type: "search", query: "q", sources: [] },
+          internal_chat_message_metadata_passthrough: { drop: true },
+        },
+        {
+          type: "code_interpreter_call",
+          id: "ci_1",
+          status: "completed",
+          code: "print(1)",
+          outputs: [],
+        },
+      ],
+    });
+
+    expect(body.input).toEqual([
+      {
+        type: "web_search_call",
+        id: "ws_1",
+        status: "completed",
+        action: { type: "search", query: "q", sources: [] },
+      },
+      {
+        type: "code_interpreter_call",
+        id: "ci_1",
+        status: "completed",
+        code: "print(1)",
+        outputs: [],
+      },
+    ]);
+  });
 });

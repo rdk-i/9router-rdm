@@ -15,6 +15,9 @@ const KNOWN_TOP_LEVEL = new Set([
 ]);
 
 const MESSAGE_ROLES = new Set(["system", "user", "assistant"]);
+const NATIVE_REASONING_ID = /^rs_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const FUNCTION_HISTORY_TYPES = new Set(["function_call", "function_call_output"]);
+const INTERNAL_HISTORY_FIELDS = new Set(["internal_chat_message_metadata_passthrough"]);
 
 export class GrokCliCompatibilityError extends Error {
   constructor(message, path = null) {
@@ -57,25 +60,241 @@ function normalizeMessage(item) {
   return { type: "message", role, content };
 }
 
-function normalizeInput(input) {
+function normalizeReasoningParts(parts, type) {
+  if (!Array.isArray(parts)) return [];
+  return parts.flatMap((part) => {
+    if (!part || typeof part !== "object" || Array.isArray(part) || typeof part.text !== "string") {
+      return [];
+    }
+    return [{ type, text: part.text }];
+  });
+}
+
+function isNativeReasoning(item) {
+  if (typeof item.id !== "string" || typeof item.encrypted_content !== "string") return false;
+  if (NATIVE_REASONING_ID.test(item.id)) return true;
+  return item.id.startsWith("tco_") && item.encrypted_content.startsWith(`${item.id}_`);
+}
+
+function normalizeReasoning(item, diagnostics) {
+  if (!isNativeReasoning(item)) {
+    diagnostics.droppedInputTypes.push("reasoning");
+    return null;
+  }
+
+  const reasoning = {
+    type: "reasoning",
+    id: item.id,
+    encrypted_content: item.encrypted_content,
+    summary: normalizeReasoningParts(item.summary, "summary_text"),
+  };
+  if (Array.isArray(item.content)) {
+    reasoning.content = normalizeReasoningParts(item.content, "reasoning_text");
+  }
+  return reasoning;
+}
+
+function requiredString(value, field, path) {
+  const normalized = typeof value === "string" ? value.trim() : "";
+  if (!normalized) {
+    throw new GrokCliCompatibilityError(`Grok CLI ${field} must be a non-empty string`, path);
+  }
+  return normalized;
+}
+
+function normalizeArguments(value) {
+  let text;
+  if (typeof value === "string") {
+    text = value;
+  } else {
+    try {
+      text = JSON.stringify(value ?? {});
+    } catch {
+      return "{}";
+    }
+  }
+  try {
+    JSON.parse(text);
+    return text;
+  } catch {
+    return "{}";
+  }
+}
+
+function normalizeFunctionCall(item, path) {
+  return {
+    type: "function_call",
+    call_id: requiredString(item.call_id, "function call_id", path),
+    name: requiredString(item.name, "function name", path),
+    arguments: normalizeArguments(item.arguments),
+  };
+}
+
+function isNativeXSearch(item) {
+  return typeof item.id === "string"
+    && item.id.startsWith("ctc_")
+    && typeof item.call_id === "string"
+    && item.call_id.startsWith("xs_call-");
+}
+
+function stringifyWireValue(value) {
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value) ?? "null";
+  } catch {
+    return "null";
+  }
+}
+
+function normalizeCustomCall(item, path) {
+  if (isNativeXSearch(item)) {
+    return {
+      type: "custom_tool_call",
+      id: item.id,
+      call_id: item.call_id,
+      name: item.name,
+      input: item.input,
+      status: item.status,
+    };
+  }
+
+  return {
+    type: "function_call",
+    call_id: requiredString(item.call_id, "custom tool call_id", path),
+    name: requiredString(item.name, "custom tool name", path),
+    arguments: JSON.stringify({ input: stringifyWireValue(item.input) }),
+  };
+}
+
+function normalizeToolOutputPart(part) {
+  if (!part || typeof part !== "object" || Array.isArray(part)) return null;
+  if (["input_text", "output_text", "text"].includes(part.type) && typeof part.text === "string") {
+    return { type: "input_text", text: part.text };
+  }
+  if (part.type !== "input_image") return null;
+
+  const image = { type: "input_image" };
+  if (typeof part.image_url === "string" && part.image_url) image.image_url = part.image_url;
+  if (typeof part.file_id === "string" && part.file_id) image.file_id = part.file_id;
+  if (!image.image_url && !image.file_id) return null;
+  if (["auto", "low", "high"].includes(part.detail)) image.detail = part.detail;
+  return image;
+}
+
+function normalizeToolOutput(output) {
+  if (typeof output === "string") return output;
+  if (Array.isArray(output) && output.length > 0) {
+    const parts = output.map(normalizeToolOutputPart);
+    if (parts.every(Boolean)) return parts;
+  }
+  return stringifyWireValue(output);
+}
+
+function normalizeFunctionOutput(item) {
+  const callId = typeof item.call_id === "string" ? item.call_id.trim() : "";
+  if (!callId) return null;
+  return {
+    type: "function_call_output",
+    call_id: callId,
+    output: normalizeToolOutput(item.output),
+  };
+}
+
+function cloneBackendHistory(item) {
+  return Object.fromEntries(
+    Object.entries(item)
+      .filter(([key]) => !INTERNAL_HISTORY_FIELDS.has(key))
+      .map(([key, value]) => [key, structuredClone(value)]),
+  );
+}
+
+function repairFunctionSegment(segment, diagnostics) {
+  const calls = new Map();
+  const lastOutput = new Map();
+  for (let index = 0; index < segment.length; index += 1) {
+    const item = segment[index];
+    if (item.type === "function_call" && !calls.has(item.call_id)) {
+      calls.set(item.call_id, item);
+    } else if (item.type === "function_call_output") {
+      lastOutput.set(item.call_id, index);
+    }
+  }
+
+  const repaired = [];
+  for (let index = 0; index < segment.length; index += 1) {
+    const item = segment[index];
+    if (item.type === "function_call") {
+      repaired.push(item);
+      continue;
+    }
+    if (!calls.has(item.call_id) || lastOutput.get(item.call_id) !== index) {
+      diagnostics.repairedHistory += 1;
+      continue;
+    }
+    repaired.push(item);
+  }
+
+  for (const [callId, call] of calls) {
+    if (lastOutput.has(callId)) continue;
+    repaired.push({
+      type: "function_call_output",
+      call_id: callId,
+      output: `Tool execution was cancelled by the user (tool \`${call.name}\` was not executed).`,
+    });
+    diagnostics.repairedHistory += 1;
+  }
+  return repaired;
+}
+
+function repairFunctionHistory(items, diagnostics) {
+  const repaired = [];
+  for (let index = 0; index < items.length;) {
+    if (!FUNCTION_HISTORY_TYPES.has(items[index].type)) {
+      repaired.push(items[index]);
+      index += 1;
+      continue;
+    }
+
+    let end = index + 1;
+    while (end < items.length && FUNCTION_HISTORY_TYPES.has(items[end].type)) end += 1;
+    repaired.push(...repairFunctionSegment(items.slice(index, end), diagnostics));
+    index = end;
+  }
+  return repaired;
+}
+
+function normalizeInputItem(item, index, diagnostics) {
+  const type = item.type || (item.role ? "message" : "");
+  const path = `input[${index}]`;
+  if (type === "message") return normalizeMessage(item);
+  if (type === "reasoning") return normalizeReasoning(item, diagnostics);
+  if (type === "function_call") return normalizeFunctionCall(item, path);
+  if (["function_call_output", "custom_tool_call_output"].includes(type)) {
+    return normalizeFunctionOutput(item);
+  }
+  if (type === "custom_tool_call") return normalizeCustomCall(item, path);
+  if (["web_search_call", "code_interpreter_call"].includes(type)) {
+    return cloneBackendHistory(item);
+  }
+  if (type === "item_reference") return null;
+  throw new GrokCliCompatibilityError(
+    `Unsupported Grok CLI input item type: ${type || "<missing>"}`,
+    path,
+  );
+}
+
+function normalizeInput(input, diagnostics) {
   if (typeof input === "string") {
     return [{ type: "message", role: "user", content: input || "..." }];
   }
   if (!Array.isArray(input)) return [];
 
-  return input.flatMap((item, index) => {
+  const normalized = input.flatMap((item, index) => {
     if (!item || typeof item !== "object" || Array.isArray(item)) return [];
-    const type = item.type || (item.role ? "message" : "");
-    if (type === "message") {
-      const message = normalizeMessage(item);
-      return message ? [message] : [];
-    }
-    if (type === "item_reference") return [];
-    throw new GrokCliCompatibilityError(
-      `Unsupported Grok CLI input item type: ${type || "<missing>"}`,
-      `input[${index}]`,
-    );
+    const normalizedItem = normalizeInputItem(item, index, diagnostics);
+    return normalizedItem ? [normalizedItem] : [];
   });
+  return repairFunctionHistory(normalized, diagnostics);
 }
 
 function sameSystemMessage(item, instructions) {
@@ -96,8 +315,14 @@ export function translateGrokCliResponsesRequest(source = {}, options = {}) {
     throw new GrokCliCompatibilityError("Grok CLI request body must be an object", "body");
   }
 
-  const droppedTopLevel = Object.keys(source).filter((key) => !KNOWN_TOP_LEVEL.has(key));
-  const input = normalizeInput(source.input);
+  const diagnostics = {
+    droppedTopLevel: Object.keys(source).filter((key) => !KNOWN_TOP_LEVEL.has(key)),
+    droppedInputTypes: [],
+    droppedToolTypes: [],
+    convertedCustomTools: 0,
+    repairedHistory: 0,
+  };
+  const input = normalizeInput(source.input, diagnostics);
   const instructions = typeof source.instructions === "string" ? source.instructions.trim() : "";
   if (instructions && !sameSystemMessage(input[0], instructions)) {
     input.unshift({ type: "message", role: "system", content: instructions });
@@ -121,12 +346,6 @@ export function translateGrokCliResponsesRequest(source = {}, options = {}) {
 
   return {
     body: providerBody,
-    diagnostics: {
-      droppedTopLevel,
-      droppedInputTypes: [],
-      droppedToolTypes: [],
-      convertedCustomTools: 0,
-      repairedHistory: 0,
-    },
+    diagnostics,
   };
 }

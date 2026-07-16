@@ -39,12 +39,16 @@ export class GrokCliCompatibilityError extends Error {
 }
 
 function normalizeMessageContent(content) {
-  if (typeof content === "string") return content;
+  if (typeof content === "string") return content.length ? content : null;
   if (!Array.isArray(content)) return null;
 
   const normalized = content.flatMap((part) => {
     if (!part || typeof part !== "object" || Array.isArray(part)) return [];
-    if (["input_text", "output_text", "text"].includes(part.type) && typeof part.text === "string") {
+    if (
+      ["input_text", "output_text", "text"].includes(part.type)
+      && typeof part.text === "string"
+      && part.text.length
+    ) {
       return [{ type: "input_text", text: part.text }];
     }
     if (part.type !== "input_image") return [];
@@ -465,7 +469,9 @@ export function translateGrokCliResponsesRequest(source = {}, options = {}) {
     repairedHistory: 0,
   };
   const input = normalizeInput(source.input, diagnostics);
-  const instructions = typeof source.instructions === "string" ? source.instructions.trim() : "";
+  const instructions = typeof source.instructions === "string" && source.instructions.trim()
+    ? source.instructions
+    : "";
   if (instructions && !sameSystemMessage(input[0], instructions)) {
     input.unshift({ type: "message", role: "system", content: instructions });
   }

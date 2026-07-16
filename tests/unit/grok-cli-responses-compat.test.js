@@ -111,6 +111,25 @@ describe("Grok CLI Responses compatibility", () => {
     ]);
   });
 
+  it("drops empty message blocks without changing instruction bytes", () => {
+    const { body } = translate({
+      instructions: "  exact system bytes\n",
+      input: [
+        { type: "message", role: "user", content: "" },
+        { type: "message", role: "assistant", content: [{ type: "output_text", text: "" }] },
+        { type: "message", role: "user", content: "next" },
+      ],
+    });
+
+    expect(body.input).toEqual([
+      { type: "message", role: "system", content: "  exact system bytes\n" },
+      { type: "message", role: "user", content: "next" },
+    ]);
+    expect(translate({ input: [{ role: "user", content: "" }] }).body.input).toEqual([
+      { type: "message", role: "user", content: "..." },
+    ]);
+  });
+
   it("rejects unknown semantic input with an exact path", () => {
     expect(() => translate({
       input: [{ type: "future_semantic_item", payload: { encrypted: true } }],

@@ -202,7 +202,6 @@ describe("GrokCliExecutor", () => {
         { type: "message", role: "system", content: "You are Grok" },
         { type: "message", role: "user", content: "hi", id: "msg_server_id" },
         { type: "item_reference", id: "rs_abc" },
-        "rs_should_drop",
       ],
       reasoning_effort: "medium",
     };

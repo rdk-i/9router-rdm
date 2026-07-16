@@ -136,6 +136,7 @@ export class GrokCliExecutor extends BaseExecutor {
     this._currentReqId = null;
     this._currentTurnIdx = 1;
     this._agentId = null;
+    this._defaultAgentId = null;
   }
 
   buildUrl() {
@@ -164,6 +165,9 @@ export class GrokCliExecutor extends BaseExecutor {
       this.config.clientIdentifier || headers["x-grok-client-identifier"] || GROK_CLI_CLIENT_IDENTIFIER;
     headers["x-grok-client-version"] =
       this.config.clientVersion || headers["x-grok-client-version"] || GROK_CLI_VERSION;
+    headers["X-XAI-Token-Auth"] ||= "xai-grok-cli";
+    headers["x-authenticateresponse"] ||= "authenticate-response";
+    headers["x-grok-client-mode"] ||= "headless";
 
     const sessionId = this._currentSessionId || credentials?.connectionId || crypto.randomUUID();
     const reqId = this._currentReqId || crypto.randomUUID();
@@ -262,23 +266,26 @@ export class GrokCliExecutor extends BaseExecutor {
   }
 
   async execute(args) {
-    // Lazy-resolve stable agent id once per process if connection has none
-    if (!this._agentId && !args.credentials?.providerSpecificData?.deviceId) {
-      try {
-        const mid = await getConsistentMachineId("grok-cli-agent");
-        // Format as UUID-ish for header aesthetics
-        this._agentId = [
-          mid.slice(0, 8),
-          mid.slice(8, 12),
-          "5" + mid.slice(13, 16),
-          "a" + mid.slice(17, 20),
-          mid.slice(0, 12).padEnd(12, "0"),
-        ].join("-");
-      } catch {
-        this._agentId = crypto.randomUUID();
+    const credentialAgentId = args.credentials?.providerSpecificData?.deviceId
+      || args.credentials?.providerSpecificData?.agentId;
+    if (credentialAgentId) {
+      this._agentId = credentialAgentId;
+    } else {
+      if (!this._defaultAgentId) {
+        try {
+          const mid = await getConsistentMachineId("grok-cli-agent");
+          this._defaultAgentId = [
+            mid.slice(0, 8),
+            mid.slice(8, 12),
+            "5" + mid.slice(13, 16),
+            "a" + mid.slice(17, 20),
+            mid.slice(0, 12).padEnd(12, "0"),
+          ].join("-");
+        } catch {
+          this._defaultAgentId = crypto.randomUUID();
+        }
       }
-    } else if (args.credentials?.providerSpecificData?.deviceId) {
-      this._agentId = args.credentials.providerSpecificData.deviceId;
+      this._agentId = this._defaultAgentId;
     }
 
     try {

@@ -368,8 +368,7 @@ const PROVIDERS = {
         // Top-level for dashboard connection cards
         email: email || undefined,
         displayName: displayName || undefined,
-        // Mirror identity into providerSpecificData so GrokCliExecutor can set
-        // x-email / x-userid without depending on top-level credential shape.
+        // Resource calls use x-userid/x-email; inference uses x-grok-user-id.
         providerSpecificData: {
           authMethod: "device_code",
           idToken: tokens.id_token || null,

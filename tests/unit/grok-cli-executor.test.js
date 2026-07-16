@@ -101,7 +101,9 @@ describe("GrokCliExecutor", () => {
 
     expect(headers.Authorization).toBe("Bearer tok_test");
     expect(headers.Accept).toBe("text/event-stream");
-    expect(headers["x-xai-token-auth"]).toBeUndefined();
+    expect(headers["X-XAI-Token-Auth"]).toBe("xai-grok-cli");
+    expect(headers["x-authenticateresponse"]).toBe("authenticate-response");
+    expect(headers["x-grok-client-mode"]).toBe("headless");
     expect(headers["x-grok-client-identifier"]).toBe("grok-shell");
     expect(headers["x-grok-client-version"]).toBe("0.2.99");
     expect(headers["x-grok-session-id"]).toBe("sess-abc");
@@ -115,7 +117,6 @@ describe("GrokCliExecutor", () => {
     expect(headers["x-compaction-at"]).toBeUndefined();
     expect(headers["x-email"]).toBeUndefined();
     expect(headers["x-userid"]).toBeUndefined();
-    expect(headers["x-authenticateresponse"]).toBeUndefined();
   });
 
   it("buildHeaders falls back to top-level email/userId (OAuth mapTokens shape)", () => {
@@ -502,6 +503,27 @@ describe("GrokCliExecutor", () => {
         code: "grok_cli_compatibility_error",
       },
     });
+  });
+
+  it("does not reuse a credential agent id for another account", async () => {
+    executor._defaultAgentId = "machine-default";
+    const invalidBody = { input: [{ type: "future_semantic_item" }] };
+
+    await executor.execute({
+      model: "grok-4.5",
+      body: invalidBody,
+      stream: true,
+      credentials: { connectionId: "account-a", providerSpecificData: { deviceId: "account-a-agent" } },
+    });
+    expect(executor._agentId).toBe("account-a-agent");
+
+    await executor.execute({
+      model: "grok-4.5",
+      body: { input: [{ type: "future_semantic_item" }] },
+      stream: true,
+      credentials: { connectionId: "account-b", providerSpecificData: {} },
+    });
+    expect(executor._agentId).toBe("machine-default");
   });
 
   it("throws compatibility errors from direct transforms", () => {

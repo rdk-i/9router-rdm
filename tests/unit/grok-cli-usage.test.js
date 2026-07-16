@@ -130,6 +130,38 @@ describe("parseGrokCliBilling", () => {
       resetAt: "2026-08-01T00:00:00.000Z",
     });
   });
+
+  it("prefers current credit usage percentage and shows percentage-only quota", () => {
+    const withLimit = parseGrokCliBilling({
+      creditUsagePercent: 27.5,
+      monthlyLimit: { val: 1000 },
+      used: { val: 900 },
+    });
+    expect(withLimit.quotas["Monthly included"]).toMatchObject({
+      used: 275,
+      total: 1000,
+      remainingPercentage: 72.5,
+    });
+
+    const percentageOnly = parseGrokCliBilling({ creditUsagePercent: 42.5 });
+    expect(percentageOnly.quotas["Monthly included"]).toMatchObject({
+      used: 42.5,
+      total: 100,
+    });
+    expect(percentageOnly.quotas["Monthly included"].remainingPercentage).toBeCloseTo(57.5);
+  });
+
+  it("falls back to legacy monthly used field", () => {
+    const parsed = parseGrokCliBilling({
+      monthlyLimit: { val: 1000 },
+      used: { val: 275 },
+    });
+    expect(parsed.quotas["Monthly included"]).toMatchObject({
+      used: 275,
+      total: 1000,
+      remainingPercentage: 72.5,
+    });
+  });
 });
 
 describe("getUsageForProvider(grok-cli)", () => {

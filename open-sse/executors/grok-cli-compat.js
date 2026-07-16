@@ -327,10 +327,15 @@ function normalizeInput(input, diagnostics) {
   if (typeof input === "string") {
     return [{ type: "message", role: "user", content: input || "..." }];
   }
-  if (!Array.isArray(input)) return [];
+  if (input == null) return [];
+  if (!Array.isArray(input)) {
+    throw new GrokCliCompatibilityError("Grok CLI input must be a string or array", "input");
+  }
 
   const normalized = input.flatMap((item, index) => {
-    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      throw new GrokCliCompatibilityError("Grok CLI input item must be an object", `input[${index}]`);
+    }
     const normalizedItem = normalizeInputItem(item, index, diagnostics);
     return normalizedItem ? [normalizedItem] : [];
   });

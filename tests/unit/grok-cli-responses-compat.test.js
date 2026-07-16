@@ -160,6 +160,15 @@ describe("Grok CLI Responses compatibility", () => {
     })).toThrowError(expect.objectContaining({ path: "input[0].content[1]" }));
   });
 
+  it("rejects malformed input containers and array entries", () => {
+    expect(() => translate({
+      input: { role: "user", content: "lost" },
+    })).toThrowError(expect.objectContaining({ path: "input" }));
+
+    expect(() => translate({ input: ["lost"] }))
+      .toThrowError(expect.objectContaining({ path: "input[0]" }));
+  });
+
   it("preserves native reasoning and x-search history while dropping foreign ciphertext", () => {
     const responseId = "144f7ee6-7881-9c5b-8bc5-ce10354424af";
     const reasoningId = `rs_${responseId}`;

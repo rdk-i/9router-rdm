@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import {
   GrokCliExecutor,
   countGrokCliUserTurns,
@@ -8,6 +8,7 @@ import {
   normalizeGrokCliEffort,
   supportsGrokCliReasoningEffort,
 } from "../../open-sse/executors/grok-cli.js";
+import { GrokCliCompatibilityError } from "../../open-sse/executors/grok-cli-compat.js";
 import { getExecutor, hasSpecializedExecutor } from "../../open-sse/executors/index.js";
 import { PROVIDERS, PROVIDER_OAUTH, PROVIDER_MODELS } from "../../open-sse/providers/index.js";
 import { getModelUpstreamId } from "../../open-sse/config/providerModels.js";
@@ -89,7 +90,11 @@ describe("GrokCliExecutor", () => {
     const headers = executor.buildHeaders(
       {
         accessToken: "tok_test",
-        providerSpecificData: { email: "u@example.com", userId: "uid-1" },
+        providerSpecificData: {
+          email: "u@example.com",
+          userId: "uid-1",
+          deploymentId: "deployment-1",
+        },
       },
       true
     );
@@ -105,9 +110,11 @@ describe("GrokCliExecutor", () => {
     expect(headers["x-grok-turn-idx"]).toBe("3");
     expect(headers["x-grok-agent-id"]).toBe("agent-1");
     expect(headers["x-grok-model-override"]).toBe("grok-4.5");
+    expect(headers["x-grok-user-id"]).toBe("uid-1");
+    expect(headers["x-grok-deployment-id"]).toBe("deployment-1");
     expect(headers["x-compaction-at"]).toBeUndefined();
-    expect(headers["x-email"]).toBe("u@example.com");
-    expect(headers["x-userid"]).toBe("uid-1");
+    expect(headers["x-email"]).toBeUndefined();
+    expect(headers["x-userid"]).toBeUndefined();
     expect(headers["x-authenticateresponse"]).toBeUndefined();
   });
 
@@ -125,8 +132,9 @@ describe("GrokCliExecutor", () => {
       true
     );
 
-    expect(headers["x-email"]).toBe("top@example.com");
+    expect(headers["x-email"]).toBeUndefined();
     expect(headers["x-userid"]).toBeUndefined();
+    expect(headers["x-grok-user-id"]).toBeUndefined();
   });
 
   it("transformRequest normalizes Responses body like official CLI", () => {
@@ -244,7 +252,7 @@ describe("GrokCliExecutor", () => {
     expect(out.input[2]).toEqual({
       type: "function_call_output",
       call_id: "call-custom",
-      output: JSON.stringify([{ type: "input_text", text: "first" }, { type: "input_text", text: "second" }]),
+      output: [{ type: "input_text", text: "first" }, { type: "input_text", text: "second" }],
     });
     expect(out.input.some((item) => item.call_id === "call-function")).toBe(false);
     expect(out.tools[0].parameters).toEqual({
@@ -262,8 +270,6 @@ describe("GrokCliExecutor", () => {
         { type: "function_call_output", call_id: "call-array", output: [1, 2] },
         { type: "function_call", call_id: "call-null", name: "null_tool", arguments: "{}" },
         { type: "function_call_output", call_id: "call-null", output: null },
-        { type: "custom_tool_call", call_id: "call-invalid", input: "missing name" },
-        { type: "custom_tool_call_output", call_id: "call-invalid", output: "orphan" },
       ],
     }, true, { connectionId: "structured-output" });
 
@@ -275,7 +281,7 @@ describe("GrokCliExecutor", () => {
     expect(out.input.some((item) => item.call_id === "call-invalid")).toBe(false);
   });
 
-  it("preserves native Grok encrypted reasoning and item ids", () => {
+  it("preserves native Grok encrypted reasoning while stripping output-only ids", () => {
     const reasoningId = "rs_3e3f6187-892a-96db-893b-904eff019e19";
     const messageId = "msg_3e3f6187-892a-96db-893b-904eff019e19";
     const functionId = "fc_3e3f6187-892a-96db-893b-904eff019e19";
@@ -303,8 +309,8 @@ describe("GrokCliExecutor", () => {
       encrypted_content: "grok-ciphertext",
     });
     expect(out.input[0].internal_chat_message_metadata_passthrough).toBeUndefined();
-    expect(out.input[1].id).toBe(messageId);
-    expect(out.input[2].id).toBe(functionId);
+    expect(out.input[1].id).toBeUndefined();
+    expect(out.input[2].id).toBeUndefined();
   });
 
   it("normalizes official effort aliases", () => {
@@ -319,7 +325,7 @@ describe("GrokCliExecutor", () => {
       input: "hi",
       reasoning: { effort: "max", summary: "detailed" },
     }, true, { connectionId: "effort-conn" });
-    expect(out.reasoning).toEqual({ effort: "xhigh", summary: "detailed" });
+    expect(out.reasoning).toEqual({ effort: "xhigh", summary: "concise" });
   });
 
   it("omits reasoning effort for models that reject it", () => {
@@ -469,8 +475,39 @@ describe("GrokCliExecutor", () => {
     const creds = { connectionId: "retry-conn" };
     executor.transformRequest("grok-build", body, true, creds);
     const firstTurn = executor._currentTurnIdx;
+    const firstReqId = executor._currentReqId;
     executor.transformRequest("grok-build", body, true, creds);
     expect(executor._currentTurnIdx).toBe(firstTurn);
+    expect(executor._currentReqId).toBe(firstReqId);
+  });
+
+  it("returns a local 400 before transport for incompatible history", async () => {
+    executor._agentId = "agent-test";
+    const headersSpy = vi.spyOn(executor, "buildHeaders");
+    const result = await executor.execute({
+      model: "grok-4.5",
+      body: { input: [{ type: "future_semantic_item", payload: true }] },
+      stream: true,
+      credentials: { accessToken: "unused", connectionId: "compat-error" },
+      log: null,
+    });
+
+    expect(headersSpy).not.toHaveBeenCalled();
+    expect(result.response.status).toBe(400);
+    expect(await result.response.json()).toEqual({
+      error: {
+        message: "Unsupported Grok CLI input item type: future_semantic_item",
+        type: "invalid_request_error",
+        param: "input[0]",
+        code: "grok_cli_compatibility_error",
+      },
+    });
+  });
+
+  it("throws compatibility errors from direct transforms", () => {
+    expect(() => executor.transformRequest("grok-4.5", {
+      input: [{ type: "function_call", call_id: "missing-name", arguments: "{}" }],
+    }, true, { connectionId: "bad-direct" })).toThrowError(GrokCliCompatibilityError);
   });
 
   it("bounds per-session turn state", () => {

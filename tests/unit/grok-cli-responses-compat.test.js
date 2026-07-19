@@ -428,8 +428,6 @@ describe("Grok CLI Responses compatibility", () => {
         { type: "web_search", filters: { allowed_domains: ["ignored.example"] } },
         { type: "x_search", unsupported: true },
         { type: "x_search" },
-        { type: "web_search_preview" },
-        { type: "file_search" },
         {
           type: "function",
           name: "web_search",
@@ -475,10 +473,24 @@ describe("Grok CLI Responses compatibility", () => {
     expect(diagnostics.droppedToolTypes).toEqual(expect.arrayContaining([
       "web_search",
       "x_search",
-      "web_search_preview",
-      "file_search",
       "function:web_search",
     ]));
+  });
+
+  it("rejects unsupported typed hosted tools with an exact path", () => {
+    const run = () => translate({
+      input: "search",
+      tools: [
+        { type: "function", name: "read_file", parameters: { type: "object" } },
+        { type: "file_search", vector_store_ids: ["vs_1"] },
+      ],
+    });
+
+    expect(run).toThrowError(GrokCliCompatibilityError);
+    expect(run).toThrowError(expect.objectContaining({
+      status: 400,
+      path: "tools[1].type",
+    }));
   });
 
   it("normalizes tool choice against final tools", () => {

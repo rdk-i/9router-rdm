@@ -410,7 +410,7 @@ function normalizeTools(source, diagnostics) {
   const functions = [];
   const hosted = [];
   const seenHosted = new Set();
-  for (const tool of source) {
+  for (const [index, tool] of source.entries()) {
     if (!tool || typeof tool !== "object" || Array.isArray(tool)) {
       diagnostics.droppedToolTypes.push("<invalid>");
       continue;
@@ -428,6 +428,12 @@ function normalizeTools(source, diagnostics) {
 
     const custom = type === "custom";
     const functionLike = type === "function" || custom || (!type && (tool.name || tool.function));
+    if (type && !functionLike) {
+      throw new GrokCliCompatibilityError(
+        `Unsupported Grok CLI tool type: ${type}`,
+        `tools[${index}].type`,
+      );
+    }
     if (!functionLike) {
       diagnostics.droppedToolTypes.push(type || "<missing>");
       continue;

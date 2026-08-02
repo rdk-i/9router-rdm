@@ -15,14 +15,20 @@ mkdir -p "$DEST"
 
 # Copy data without stopping the official container. SQLite is copied with
 # sqlite3 backup when available; otherwise preserve a raw copy and warn.
-if command -v sqlite3 >/dev/null 2>&1 && [[ -f "$DATA_DIR/data.sqlite" ]]; then
-  sqlite3 "$DATA_DIR/data.sqlite" ".backup '$DEST/data.sqlite'"
-elif [[ -f "$DATA_DIR/data.sqlite" ]]; then
-  cp -p "$DATA_DIR/data.sqlite" "$DEST/data.sqlite.raw"
+DB_PATH="$DATA_DIR/db/data.sqlite"
+if command -v sqlite3 >/dev/null 2>&1 && [[ -f "$DB_PATH" ]]; then
+  sqlite3 "$DB_PATH" ".backup '$DEST/data.sqlite'"
+elif [[ -f "$DB_PATH" ]]; then
+  cp -p "$DB_PATH" "$DEST/data.sqlite.raw"
   echo "WARNING: sqlite3 unavailable; raw copy created while service may be active" >&2
+else
+  echo "WARNING: database not found at $DB_PATH" >&2
 fi
 
 for item in settings.json usage.json request-details.json log.txt; do
+  [[ -e "$DATA_DIR/$item" ]] && cp -a "$DATA_DIR/$item" "$DEST/"
+done
+for item in db/data.sqlite-wal db/data.sqlite-shm; do
   [[ -e "$DATA_DIR/$item" ]] && cp -a "$DATA_DIR/$item" "$DEST/"
 done
 

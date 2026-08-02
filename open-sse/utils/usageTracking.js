@@ -190,7 +190,7 @@ export function canonicalizeUsage(usage) {
     prompt = prompt + cached + cacheCreation;
   } else {
     // OpenAI/Gemini path (or already-canonical input): prompt already includes cached_tokens.
-    cached = num(usage.cached_tokens);
+    cached = num(usage.cached_tokens ?? usage.prompt_tokens_details?.cached_tokens ?? usage.input_tokens_details?.cached_tokens);
   }
 
   const result = {

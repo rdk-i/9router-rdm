@@ -17,6 +17,7 @@ export default function NoAuthProxyCard({ providerId }) {
   const [proxyPools, setProxyPools] = useState([]);
   const [proxyPoolId, setProxyPoolId] = useState(NONE_PROXY_POOL_VALUE);
   const [rotateStrategy, setRotateStrategy] = useState("none");
+  const [autoRecreateOnFree429, setAutoRecreateOnFree429] = useState(false);
   const [saving, setSaving] = useState(false);
   const [savedFlash, setSavedFlash] = useState(false);
 
@@ -31,11 +32,12 @@ export default function NoAuthProxyCard({ providerId }) {
       const override = (settingsData.providerStrategies || {})[providerId] || {};
       setProxyPoolId(override.proxyPoolId || NONE_PROXY_POOL_VALUE);
       setRotateStrategy(override.rotateStrategy || "none");
+      setAutoRecreateOnFree429(override.autoRecreateOnFree429 === true);
     }).catch(() => {});
     return () => { cancelled = true; };
   }, [providerId]);
 
-  const save = useCallback(async (poolId, strategy) => {
+  const save = useCallback(async (poolId, strategy, autoRecreate = autoRecreateOnFree429) => {
     setSaving(true);
     try {
       const res = await fetch("/api/settings", { cache: "no-store" });
@@ -46,6 +48,7 @@ export default function NoAuthProxyCard({ providerId }) {
       else override.proxyPoolId = poolId;
       if (strategy === "none") delete override.rotateStrategy;
       else override.rotateStrategy = strategy;
+      if (providerId === "opencode") override.autoRecreateOnFree429 = autoRecreate;
       const updated = { ...current };
       if (Object.keys(override).length === 0) delete updated[providerId];
       else updated[providerId] = override;
@@ -61,7 +64,7 @@ export default function NoAuthProxyCard({ providerId }) {
     } finally {
       setSaving(false);
     }
-  }, [providerId]);
+  }, [autoRecreateOnFree429, providerId]);
 
   const handlePoolChange = (newPoolId) => {
     setProxyPoolId(newPoolId);
@@ -71,6 +74,11 @@ export default function NoAuthProxyCard({ providerId }) {
   const handleStrategyChange = (newStrategy) => {
     setRotateStrategy(newStrategy);
     save(proxyPoolId, newStrategy);
+  };
+
+  const handleAutoRecreateChange = (enabled) => {
+    setAutoRecreateOnFree429(enabled);
+    save(proxyPoolId, rotateStrategy, enabled);
   };
 
   const canRotate = proxyPools.length >= 2;
@@ -125,6 +133,25 @@ export default function NoAuthProxyCard({ providerId }) {
               : `Uses the selected pool above. Set to Round-robin or Random to rotate across all active pools.`}
         </p>
       </div>
+
+      {providerId === "opencode" && (
+        <div className="mt-5 rounded-lg border border-orange-500/20 bg-orange-500/5 p-3">
+          <label className="flex items-start justify-between gap-3 cursor-pointer">
+            <span>
+              <span className="block text-sm font-medium text-text-main">Auto-recreate WARP on OpenCode Free 429</span>
+              <span className="block mt-1 text-xs text-text-muted">Recreate one WARP node when oc/deepseek-v4-flash-free returns FreeUsageLimitError.</span>
+            </span>
+            <input
+              type="checkbox"
+              checked={autoRecreateOnFree429}
+              onChange={(e) => handleAutoRecreateChange(e.target.checked)}
+              disabled={saving}
+              className="mt-0.5 h-4 w-4 accent-orange-500"
+            />
+          </label>
+          <p className="mt-2 text-[11px] text-text-muted">Cooldown: 10 minutes · one node per event · disabled by default.</p>
+        </div>
+      )}
     </Card>
   );
 }

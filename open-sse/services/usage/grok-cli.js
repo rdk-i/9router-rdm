@@ -141,7 +141,16 @@ export function parseGrokCliBilling(billing, user = null) {
   const tier = subscriptionTier(user, config);
   const subscriptionAccess = Boolean(tier) && !/^(free|none|null)$/i.test(tier);
 
-  // Current Grok Build responses expose included monthly usage at top level.
+  // Current Grok Build prefers a usage percentage; older responses expose
+  // absolute monthly values instead.
+  const creditUsagePercent = unwrapVal(
+    config.creditUsagePercent ?? config.credit_usage_percent
+      ?? root.creditUsagePercent ?? root.credit_usage_percent,
+    NaN,
+  );
+  const safeUsagePercent = Number.isFinite(creditUsagePercent)
+    ? Math.min(100, Math.max(0, creditUsagePercent))
+    : NaN;
   const monthlyLimit = unwrapVal(
     config.monthlyLimit ?? config.monthly_limit ?? root.monthlyLimit ?? root.monthly_limit,
     NaN,
@@ -154,14 +163,20 @@ export function parseGrokCliBilling(billing, user = null) {
     config.totalUsed ?? config.total_used ?? root.totalUsed ?? root.total_used,
     NaN,
   );
+  const legacyUsed = unwrapVal(config.used ?? root.used, NaN);
+  const absoluteUsed = [includedUsed, totalUsed, legacyUsed].find(Number.isFinite) ?? 0;
   if (Number.isFinite(monthlyLimit) && monthlyLimit > 0) {
     quotas["Monthly included"] = makeQuota({
-      used: Number.isFinite(includedUsed)
-        ? includedUsed
-        : Number.isFinite(totalUsed)
-          ? totalUsed
-          : 0,
+      used: Number.isFinite(safeUsagePercent)
+        ? (monthlyLimit * safeUsagePercent) / 100
+        : absoluteUsed,
       total: monthlyLimit,
+      resetAt: periodEnd,
+    });
+  } else if (Number.isFinite(safeUsagePercent)) {
+    quotas["Monthly included"] = makeQuota({
+      used: safeUsagePercent,
+      total: 100,
       resetAt: periodEnd,
     });
   }

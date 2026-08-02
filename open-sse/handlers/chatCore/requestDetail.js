@@ -39,7 +39,10 @@ export function extractUsageFromResponse(responseBody) {
     return {
       prompt_tokens: responseBody.usage.prompt_tokens || 0,
       completion_tokens: responseBody.usage.completion_tokens || 0,
-      cached_tokens: responseBody.usage.prompt_tokens_details?.cached_tokens,
+      cached_tokens: responseBody.usage.cached_tokens ?? responseBody.usage.prompt_tokens_details?.cached_tokens ?? responseBody.usage.input_tokens_details?.cached_tokens,
+      cache_creation_input_tokens: responseBody.usage.cache_creation_input_tokens ?? responseBody.usage.prompt_tokens_details?.cache_creation_tokens ?? responseBody.usage.input_tokens_details?.cache_creation_tokens,
+      prompt_tokens_details: responseBody.usage.prompt_tokens_details,
+      input_tokens_details: responseBody.usage.input_tokens_details,
       reasoning_tokens: responseBody.usage.completion_tokens_details?.reasoning_tokens
     };
   }

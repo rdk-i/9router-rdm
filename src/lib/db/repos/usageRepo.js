@@ -63,7 +63,11 @@ function addToCounter(target, key, values) {
 function aggregateEntryToDay(day, entry) {
   const promptTokens = entry.tokens?.prompt_tokens || entry.tokens?.input_tokens || 0;
   const completionTokens = entry.tokens?.completion_tokens || entry.tokens?.output_tokens || 0;
-  const cachedTokens = entry.tokens?.cached_tokens || entry.tokens?.cache_read_input_tokens || 0;
+  const cachedTokens = entry.tokens?.cached_tokens
+    || entry.tokens?.prompt_tokens_details?.cached_tokens
+    || entry.tokens?.input_tokens_details?.cached_tokens
+    || entry.tokens?.cache_read_input_tokens
+    || 0;
   const cost = entry.cost || 0;
   const vals = { promptTokens, completionTokens, cachedTokens, cost };
 

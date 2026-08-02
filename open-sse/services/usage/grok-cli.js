@@ -140,6 +140,8 @@ export function parseGrokCliBilling(billing, user = null) {
   const quotas = {};
   const tier = subscriptionTier(user, config);
   const subscriptionAccess = Boolean(tier) && !/^(free|none|null)$/i.test(tier);
+  const currentPeriodType = String(config.currentPeriod?.type || root.currentPeriod?.type || "").toLowerCase();
+  const hasWeeklySuperGrokPeriod = currentPeriodType.includes("weekly");
 
   // Current Grok Build prefers a usage percentage; older responses expose
   // absolute monthly values instead.
@@ -173,7 +175,7 @@ export function parseGrokCliBilling(billing, user = null) {
       total: monthlyLimit,
       resetAt: periodEnd,
     });
-  } else if (Number.isFinite(safeUsagePercent)) {
+  } else if (Number.isFinite(safeUsagePercent) && !hasWeeklySuperGrokPeriod) {
     quotas["Monthly included"] = makeQuota({
       used: safeUsagePercent,
       total: 100,

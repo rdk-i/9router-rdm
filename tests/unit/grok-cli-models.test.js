@@ -25,19 +25,97 @@ describe("Grok CLI live models", () => {
       models: [{
         model_id: "grok-build",
         display_name: "Grok Build",
-        context_window: 500000,
-        max_output_tokens: 64000,
+        apiBackend: "responses",
+        contextWindow: 500000,
+        maxOutputTokens: 64000,
+        supportsBackendSearch: true,
+        supportsReasoningEffort: true,
+        reasoningEffort: "xhigh",
+        reasoningEfforts: [{ id: "deep", value: "xhigh", label: "Deep" }],
+        compactionAtTokens: 450000,
+        compactionsRemaining: 2,
+        streamToolCalls: true,
         supported_in_api: false,
+        _meta: {
+          apiBackend: "messages",
+          contextWindow: 1,
+          maxOutputTokens: 2,
+          supportsBackendSearch: false,
+          supportsReasoningEffort: false,
+          reasoningEffort: "low",
+          reasoningEfforts: ["low"],
+          compactionAtTokens: false,
+          compactionsRemaining: 0,
+          streamToolCalls: false,
+        },
       }],
     })).toEqual([
       expect.objectContaining({
         id: "grok-build",
         name: "Grok Build",
+        apiBackend: "responses",
+        contextWindow: 500000,
         contextLength: 500000,
         maxOutputTokens: 64000,
+        supportsBackendSearch: true,
+        supportsReasoningEffort: true,
+        reasoningEffort: "xhigh",
+        reasoningEfforts: [{ id: "deep", value: "xhigh", label: "Deep" }],
+        compactionAtTokens: 450000,
+        compactionsRemaining: 2,
+        streamToolCalls: true,
         supported_in_api: false,
+        _meta: expect.objectContaining({ apiBackend: "messages" }),
       }),
     ]);
+  });
+
+  it("normalizes capability metadata from _meta without inventing values", () => {
+    const [metaModel, unknown] = parseGrokCliModels({
+      data: [
+        {
+          name: "Meta Model",
+          _meta: {
+            model: "meta-model",
+            apiBackend: "messages",
+            contextWindow: 262144,
+            maxOutputTokens: 32768,
+            supportsBackendSearch: false,
+            supportsReasoningEffort: true,
+            reasoningEffort: "high",
+            reasoningEfforts: ["low", { value: "high" }],
+            compactionAtTokens: true,
+            compactionsRemaining: false,
+            streamToolCalls: false,
+          },
+        },
+        { model: "unknown-model", context_window: 131072 },
+      ],
+    });
+
+    expect(metaModel).toEqual(expect.objectContaining({
+      id: "meta-model",
+      name: "Meta Model",
+      apiBackend: "messages",
+      contextWindow: 262144,
+      contextLength: 262144,
+      maxOutputTokens: 32768,
+      supportsBackendSearch: false,
+      supportsReasoningEffort: true,
+      reasoningEffort: "high",
+      reasoningEfforts: ["low", { value: "high" }],
+      compactionAtTokens: true,
+      compactionsRemaining: false,
+      streamToolCalls: false,
+    }));
+    expect(unknown).toEqual(expect.objectContaining({
+      id: "unknown-model",
+      contextWindow: 131072,
+      contextLength: 131072,
+    }));
+    expect(unknown).not.toHaveProperty("supportsReasoningEffort");
+    expect(unknown).not.toHaveProperty("reasoningEffort");
+    expect(unknown).not.toHaveProperty("reasoningEfforts");
   });
 
   it("refreshes and retries through selected proxy", async () => {

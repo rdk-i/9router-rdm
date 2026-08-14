@@ -6,6 +6,38 @@ const { pathToFileURL } = require("url");
 
 const origCreate = http.createServer.bind(http);
 
+// RMD model masking: rewrite client-facing model ids before Next resolves providers.
+const MODEL_MASKS_FILE = path.join(process.env.DATA_DIR || path.join(require("os").homedir(), ".9router"), "config", "model-masks.json");
+const MODEL_MASK_PATHS = new Set(["/v1/chat/completions", "/v1/responses", "/v1beta/messages", "/v1beta/chat/completions"]);
+function loadModelMasks() {
+  try { const value = JSON.parse(fs.readFileSync(MODEL_MASKS_FILE, "utf8")); return Array.isArray(value) ? value : []; }
+  catch { return []; }
+}
+function rewriteMaskedBody(raw, masks) {
+  if (!masks.length) return raw;
+  try {
+    const body = JSON.parse(raw);
+    const mask = masks.find((item) => item?.from === body?.model && typeof item.to === "string");
+    if (!mask) return raw;
+    body.model = mask.to;
+    return JSON.stringify(body);
+  } catch { return raw; }
+}
+function advertiseMaskedModels(raw, masks) {
+  if (!masks.length) return raw;
+  try {
+    const body = JSON.parse(raw);
+    if (!Array.isArray(body?.data)) return raw;
+    const ids = new Set(body.data.map((item) => item?.id));
+    for (const mask of masks) {
+      if (!mask?.from || ids.has(mask.from)) continue;
+      const target = body.data.find((item) => item?.id === mask.to);
+      body.data.push({ ...(target || {}), id: mask.from, object: "model", owned_by: target?.owned_by || "model-mask" });
+    }
+    return JSON.stringify(body);
+  } catch { return raw; }
+}
+
 // Per-process secret proving x-9r-real-ip was stamped below rather than sent by the client.
 // A bare `next start` / `next dev` never loads this file, so it cannot produce a matching
 // header even though the env var is inherited by child processes. Named like x-9r-cli-token
@@ -70,6 +102,41 @@ http.createServer = (...args) => {
     req.headers["x-9r-real-ip"] = ip;
     req.headers["x-9r-peer-token"] = PEER_TOKEN;
     if (viaProxy) req.headers["x-9r-via-proxy"] = "1";
+    const requestPath = String(req.url || "").split("?", 1)[0];
+    if (req.method === "GET" && requestPath === "/v1/models") {
+      const originalWrite = res.write.bind(res);
+      const originalEnd = res.end.bind(res);
+      const chunks = [];
+      res.write = (chunk, ...rest) => { if (chunk) chunks.push(Buffer.from(chunk)); return true; };
+      res.end = (chunk, ...rest) => {
+        if (chunk) chunks.push(Buffer.from(chunk));
+        const rewritten = advertiseMaskedModels(Buffer.concat(chunks).toString("utf8"), loadModelMasks());
+        res.write = originalWrite;
+        res.end = originalEnd;
+        res.setHeader("content-length", String(Buffer.byteLength(rewritten)));
+        return originalEnd(rewritten, ...rest);
+      };
+    }
+    if (req.method === "POST" && MODEL_MASK_PATHS.has(requestPath) && loadModelMasks().length) {
+      const chunks = [];
+      let received = 0;
+      req.on("data", (chunk) => { chunks.push(chunk); received += chunk.length; });
+      req.on("end", () => {
+        const raw = Buffer.concat(chunks, received).toString("utf8");
+        const rewritten = rewriteMaskedBody(raw, loadModelMasks());
+        const replay = new http.IncomingMessage(req.socket);
+        Object.assign(replay, {
+          method: req.method,
+          url: req.url,
+          headers: { ...req.headers, "content-length": String(Buffer.byteLength(rewritten)) },
+          complete: true,
+        });
+        replay.push(Buffer.from(rewritten, "utf8"));
+        replay.push(null);
+        handler(replay, res);
+      });
+      return;
+    }
     return handler(req, res);
   };
   const server = origCreate(...rest, wrapped);

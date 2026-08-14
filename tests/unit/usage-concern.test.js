@@ -62,6 +62,43 @@ describe("toOpenAIUsage", () => {
     expect(u.total_tokens).toBe(99);
   });
 
+  it.each([
+    [{ cachedInputTokens: 768 }],
+    [{ cached_input_tokens: 768 }],
+    [{ cacheReadInputTokens: 768 }],
+    [{ cache_read_input_tokens: 768 }],
+    [{ promptCacheHitTokens: 768 }],
+    [{ prompt_cache_hit_token_count: 768 }],
+    [{ prompt_tokens_details: { cached_tokens: 768 } }],
+    [{ inputTokensDetails: { cachedTokens: 768 } }],
+    [{ input_tokens_details: { cached_tokens: 768 } }],
+  ])("commandcode: preserves cache-read aliases from upstream usage", (cacheFields) => {
+    const u = toOpenAIUsage(
+      { inputTokens: 1000, outputTokens: 20, ...cacheFields },
+      "commandcode"
+    );
+    expect(u.prompt_tokens).toBe(1000);
+    expect(u.completion_tokens).toBe(20);
+    expect(u.total_tokens).toBe(1020);
+    expect(u.prompt_tokens_details.cached_tokens).toBe(768);
+  });
+
+  it("commandcode: accepts snake_case token fields and cache creation aliases", () => {
+    const u = toOpenAIUsage(
+      {
+        input_tokens: 1000,
+        completion_tokens: 20,
+        total_tokens: 1020,
+        cache_creation_input_tokens: 128,
+      },
+      "commandcode"
+    );
+    expect(u.prompt_tokens).toBe(1000);
+    expect(u.completion_tokens).toBe(20);
+    expect(u.total_tokens).toBe(1020);
+    expect(u.prompt_tokens_details.cache_creation_tokens).toBe(128);
+  });
+
   it("unknown kind / null raw -> null", () => {
     expect(toOpenAIUsage({}, "nope")).toBeNull();
     expect(toOpenAIUsage(null, "claude")).toBeNull();

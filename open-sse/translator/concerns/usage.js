@@ -55,9 +55,61 @@ const USAGE_EXTRACTORS = {
     return { promptTokens: input, completionTokens: output, totalTokens: input + output };
   },
   commandcode(raw) {
-    const input = n(raw.inputTokens), output = n(raw.outputTokens);
-    const total = typeof raw.totalTokens === "number" ? raw.totalTokens : input + output;
-    return { promptTokens: input, completionTokens: output, totalTokens: total };
+    // CommandCode emits Vercel AI SDK-style usage. Accept both its native
+    // camelCase fields and aliases seen across gateway versions so cache
+    // telemetry is not discarded before usage persistence.
+    const usage = raw.usage && typeof raw.usage === "object" ? raw.usage : raw;
+    const firstNumber = (...values) => values.find((value) => typeof value === "number") ?? 0;
+    const input = firstNumber(
+      usage.inputTokens,
+      usage.input_tokens,
+      usage.promptTokens,
+      usage.prompt_tokens,
+      usage.inputTokenCount
+    );
+    const output = firstNumber(
+      usage.outputTokens,
+      usage.output_tokens,
+      usage.completionTokens,
+      usage.completion_tokens,
+      usage.outputTokenCount
+    );
+    const cached = firstNumber(
+      usage.cachedInputTokens,
+      usage.cached_input_tokens,
+      usage.cacheReadInputTokens,
+      usage.cache_read_input_tokens,
+      usage.cachedTokens,
+      usage.cached_tokens,
+      usage.cacheHitTokens,
+      usage.cache_hit_tokens,
+      usage.promptCacheHitTokens,
+      usage.prompt_cache_hit_tokens,
+      usage.promptCacheHitTokenCount,
+      usage.prompt_cache_hit_token_count,
+      usage.prompt_tokens_details?.cached_tokens,
+      usage.inputTokensDetails?.cachedTokens,
+      usage.input_tokens_details?.cached_tokens
+    );
+    const cacheCreation = firstNumber(
+      usage.cacheWriteInputTokens,
+      usage.cache_write_input_tokens,
+      usage.cacheCreationInputTokens,
+      usage.cache_creation_input_tokens,
+      usage.cacheCreationTokens,
+      usage.cache_creation_tokens,
+      usage.prompt_tokens_details?.cache_creation_tokens,
+      usage.inputTokensDetails?.cacheCreationTokens,
+      usage.input_tokens_details?.cache_creation_tokens
+    );
+    const total = firstNumber(usage.totalTokens, usage.total_tokens, usage.totalTokenCount) || input + output;
+    return {
+      promptTokens: input,
+      completionTokens: output,
+      totalTokens: total,
+      cachedTokens: cached,
+      cacheCreationTokens: cacheCreation,
+    };
   },
 };
 

@@ -20,7 +20,7 @@ export function getQuotaCooldown(backoffLevel = 0) {
  * @param {number} backoffLevel - Current backoff level for exponential backoff
  * @returns {{ shouldFallback: boolean, cooldownMs: number, newBackoffLevel?: number }}
  */
-export function checkFallbackError(status, errorText, backoffLevel = 0) {
+export function checkFallbackError(status, errorText, backoffLevel = 0, options = {}) {
   const lowerError = errorText
     ? (typeof errorText === "string" ? errorText : JSON.stringify(errorText)).toLowerCase()
     : "";
@@ -45,7 +45,7 @@ export function checkFallbackError(status, errorText, backoffLevel = 0) {
     }
   }
 
-  if (status === 400 || status === 422) {
+  if ((status === 400 || status === 422) && !options.allowClientErrorFallback) {
     return { shouldFallback: false, cooldownMs: 0 };
   }
 

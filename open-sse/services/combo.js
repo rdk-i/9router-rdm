@@ -282,8 +282,11 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
   let rotatedModels = getRotatedModels(models, comboName, comboStrategy, comboStickyLimit);
 
   // Auto-switch: float models that satisfy the request's required capabilities to the front.
+  const requiredCapabilities = detectRequiredCapabilities(body);
+  const isCapacityAdapterRequest = requiredCapabilities.size > 0;
+
   if (autoSwitch) {
-    const required = detectRequiredCapabilities(body);
+    const required = requiredCapabilities;
     if (required.size > 0) {
       const reordered = reorderByCapabilities(rotatedModels, required);
       if (reordered[0] !== rotatedModels[0]) {
@@ -332,7 +335,12 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
       }
 
       // Check if should fallback to next model
-      const { shouldFallback, cooldownMs } = checkFallbackError(result.status, errorText);
+      const { shouldFallback, cooldownMs } = checkFallbackError(
+        result.status,
+        errorText,
+        0,
+        { allowClientErrorFallback: isCapacityAdapterRequest },
+      );
 
       if (!shouldFallback) {
         log.warn("COMBO", `Model ${modelStr} failed (no fallback)`, { status: result.status });

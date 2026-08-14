@@ -9,6 +9,13 @@ describe("account fallback classification", () => {
       .toEqual({ shouldFallback: false, cooldownMs: 0 });
   });
 
+  it("allows 400/422 fallback only for capability adapter requests", () => {
+    expect(checkFallbackError(400, "Image input rejected", 0, { allowClientErrorFallback: true }).shouldFallback)
+      .toBe(true);
+    expect(checkFallbackError(422, "Unsupported image format", 0, { allowClientErrorFallback: true }).shouldFallback)
+      .toBe(true);
+  });
+
   it("keeps capacity and rate-limit text above client status", () => {
     expect(checkFallbackError(400, "Selected model is at capacity").shouldFallback).toBe(true);
     expect(checkFallbackError(422, "Rate limit reached").shouldFallback).toBe(true);

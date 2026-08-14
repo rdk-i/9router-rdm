@@ -45,7 +45,7 @@ const JWT_SECRET_FILE = path.join(process.env.DATA_DIR || path.join(require("os"
 function isAuthed(req) {
   try {
     const cookie = req.headers.cookie || "";
-    const match = cookie.match(/(?:^|;\\s*)auth_token=([^;]+)/);
+    const match = cookie.match(/(?:^|;\s*)auth_token=([^;]+)/);
     if (!match) return false;
     const token = decodeURIComponent(match[1]);
     const secret = fs.readFileSync(JWT_SECRET_FILE, "utf8").trim();

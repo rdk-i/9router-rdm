@@ -38,6 +38,82 @@ function advertiseMaskedModels(raw, masks) {
   } catch { return raw; }
 }
 
+// Model masking management UI/API. These routes are served before Next so the
+// page survives Next rebuilds and edits to the mask file apply without restart.
+const MODEL_MASKING_PAGE_FILE = path.join(process.env.DATA_DIR || path.join(require("os").homedir(), ".9router"), "config", "model-masking.html");
+const JWT_SECRET_FILE = path.join(process.env.DATA_DIR || path.join(require("os").homedir(), ".9router"), "jwt-secret");
+function isAuthed(req) {
+  try {
+    const cookie = req.headers.cookie || "";
+    const match = cookie.match(/(?:^|;\\s*)auth_token=([^;]+)/);
+    if (!match) return false;
+    const token = decodeURIComponent(match[1]);
+    const secret = fs.readFileSync(JWT_SECRET_FILE, "utf8").trim();
+    const [header, payload, signature] = token.split(".");
+    if (!header || !payload || !signature) return false;
+    const expected = crypto.createHmac("sha256", secret).update(header + "." + payload).digest("base64url");
+    if (expected !== signature) return false;
+    const claims = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    return claims.authenticated === true && claims.exp > Math.floor(Date.now() / 1000);
+  } catch { return false; }
+}
+function readBody(req) {
+  return new Promise((resolve) => {
+    const chunks = [];
+    req.on("data", (chunk) => chunks.push(chunk));
+    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    req.on("error", () => resolve(""));
+  });
+}
+function sendJson(res, status, value) {
+  res.writeHead(status, { "Content-Type": "application/json", "Cache-Control": "no-store" });
+  res.end(JSON.stringify(value));
+}
+function writeModelMasks(masks) {
+  const temp = MODEL_MASKS_FILE + ".tmp";
+  fs.writeFileSync(temp, JSON.stringify(masks, null, 2));
+  fs.renameSync(temp, MODEL_MASKS_FILE);
+}
+async function handleModelMasksApi(req, res) {
+  if (!isAuthed(req)) return sendJson(res, 401, { error: "Unauthorized" });
+  const url = new URL(req.url, "http://localhost");
+  if (req.method === "GET") return sendJson(res, 200, { masks: loadModelMasks() });
+  if (req.method === "POST") {
+    let body;
+    try { body = JSON.parse(await readBody(req)); } catch { return sendJson(res, 400, { error: "Invalid JSON" }); }
+    const from = String(body.from || "").trim();
+    const to = String(body.to || "").trim();
+    if (!from || !to || from === to) return sendJson(res, 400, { error: "Valid from and to are required" });
+    const masks = loadModelMasks();
+    const index = masks.findIndex((item) => item?.from === from);
+    if (index >= 0) masks[index] = { from, to }; else masks.push({ from, to });
+    writeModelMasks(masks);
+    return sendJson(res, 200, { success: true, masks });
+  }
+  if (req.method === "DELETE") {
+    const from = String(url.searchParams.get("from") || "").trim();
+    if (!from) return sendJson(res, 400, { error: "from is required" });
+    const masks = loadModelMasks().filter((item) => item?.from !== from);
+    writeModelMasks(masks);
+    return sendJson(res, 200, { success: true, masks });
+  }
+  return sendJson(res, 405, { error: "Method not allowed" });
+}
+async function handleMaskingPage(req, res) {
+  if (!isAuthed(req)) {
+    res.writeHead(302, { Location: "/login" });
+    return res.end();
+  }
+  try {
+    const html = fs.readFileSync(MODEL_MASKING_PAGE_FILE, "utf8");
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+    res.end(html);
+  } catch {
+    res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+    res.end("model-masking.html not found");
+  }
+}
+
 // Per-process secret proving x-9r-real-ip was stamped below rather than sent by the client.
 // A bare `next start` / `next dev` never loads this file, so it cannot produce a matching
 // header even though the env var is inherited by child processes. Named like x-9r-cli-token
@@ -102,6 +178,14 @@ http.createServer = (...args) => {
     req.headers["x-9r-real-ip"] = ip;
     req.headers["x-9r-peer-token"] = PEER_TOKEN;
     if (viaProxy) req.headers["x-9r-via-proxy"] = "1";
+    if (req.url.startsWith("/dashboard/model-masking")) {
+      handleMaskingPage(req, res).catch(() => { try { res.writeHead(500); res.end(); } catch {} });
+      return;
+    }
+    if (req.url.startsWith("/api/model-masks")) {
+      handleModelMasksApi(req, res).catch((error) => sendJson(res, 500, { error: String(error?.message || error) }));
+      return;
+    }
     const requestPath = String(req.url || "").split("?", 1)[0];
     if (req.method === "GET" && requestPath === "/v1/models") {
       const originalWrite = res.write.bind(res);

@@ -674,7 +674,7 @@ export function decodeVarint(buffer, offset) {
 
   while (pos < buffer.length) {
     const b = buffer[pos];
-    result |= (b & 0x7F) << shift;
+    result += (b & 0x7F) * (2 ** shift);
     pos++;
     if (!(b & 0x80)) break;
     shift += 7;

@@ -159,17 +159,16 @@ export default function CombosPage() {
     });
   };
 
-  // Merge a per-combo strategy patch into settings.comboStrategies. Passing an empty
-  // patch (strategy back to default "fallback") drops the entry entirely.
+  // Persist the explicit per-combo strategy, including "fallback".
+  // An omitted entry would inherit the global strategy, which may be round-robin.
   const handleSetComboStrategy = async (comboName, patch) => {
     try {
       const updated = { ...comboStrategies };
       const next = { ...(updated[comboName] || {}), ...patch };
-      // Prune to keep settings clean: default fallback with no extras = no entry.
-      if (!next.fallbackStrategy || next.fallbackStrategy === "fallback") {
-        delete updated[comboName];
-      } else {
+      if (next.fallbackStrategy) {
         updated[comboName] = next;
+      } else {
+        delete updated[comboName];
       }
 
       await fetch("/api/settings", {

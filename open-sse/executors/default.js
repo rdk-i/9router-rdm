@@ -148,7 +148,18 @@ export class DefaultExecutor extends BaseExecutor {
 
   buildHeaders(credentials, stream = true, url, model) {
     const rt = credentials?.runtimeTransport;
-    const headers = { "Content-Type": "application/json", ...(rt ? rt.headers : this.config.headers) };
+    const providerHeaders = credentials?.providerSpecificData?.headers;
+    const customHeaders = providerHeaders && typeof providerHeaders === "object"
+      ? Object.fromEntries(Object.entries(providerHeaders).filter(([key]) => {
+          const normalized = String(key).toLowerCase();
+          return normalized !== "authorization" && normalized !== "x-api-key" && normalized !== "api-key";
+        }))
+      : {};
+    const headers = {
+      "Content-Type": "application/json",
+      ...(rt ? rt.headers : this.config.headers),
+      ...customHeaders,
+    };
     const desc = rt?.auth || AUTH_DESCRIPTORS[this.provider] || this.resolveAuthDescriptor();
     // Hooks run BEFORE auth so dynamic overlays can't clobber the token.
     for (const hook of desc.hooks || []) HEADER_HOOKS[hook]?.(headers, credentials);

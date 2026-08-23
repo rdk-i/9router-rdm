@@ -69,8 +69,8 @@ export default function ModelRow({ model, fullModel, alias, copied, onCopy, test
                     onKeyDown={(event) => {
                       if (event.key === "Enter" || event.key === " ") toggleInputCapability(event, item.key);
                     }}
-                    className={`material-symbols-outlined leading-none rounded px-0.5 transition-colors ${active ? "text-primary" : "text-text-muted/35"} ${manual ? "ring-1 ring-primary/40" : ""}`}
-                    style={{ fontSize: "12px" }}
+                    className={`material-symbols-outlined leading-none rounded px-0.5 transition-colors ${active ? "text-primary bg-primary/12" : "text-text-muted/35"} ${manual ? "font-semibold" : ""}`}
+                    style={{ fontSize: "12px", fontVariationSettings: active ? "'FILL' 1" : "'FILL' 0" }}
                   >
                     {item.icon}
                   </span>

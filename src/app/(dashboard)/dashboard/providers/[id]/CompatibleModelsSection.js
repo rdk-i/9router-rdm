@@ -4,7 +4,9 @@ import { useState } from "react";
 import PropTypes from "prop-types";
 import { Button } from "@/shared/components";
 import { getProviderCustomModelRows } from "@/shared/utils/providerCustomModels";
-function CompatibleModelRow({ modelId, fullModel, copied, onCopy, onDeleteAlias, onTest, testStatus, isTesting }) {
+import { useModelCaps } from "@/shared/hooks/useModelCaps";
+function CompatibleModelRow({ modelId, fullModel, capabilityModel, copied, onCopy, onDeleteAlias, onTest, testStatus, isTesting }) {
+  const { getCaps, getOverride, setOverride } = useModelCaps();
   const borderColor = testStatus === "ok"
     ? "border-green-500/40"
     : testStatus === "error"
@@ -17,6 +19,25 @@ function CompatibleModelRow({ modelId, fullModel, copied, onCopy, onDeleteAlias,
     ? "#ef4444"
     : undefined;
 
+  const caps = getCaps(capabilityModel) || {};
+  const overrides = getOverride(capabilityModel);
+  const inputCapabilities = [
+    { key: "text", icon: "text_fields", label: "Text input" },
+    { key: "vision", icon: "image", label: "Image input" },
+    { key: "videoInput", icon: "movie", label: "Video input" },
+  ];
+  const hasOverride = Object.values(overrides).some((value) => value === true || value === false);
+  const toggleInputCapability = async (event, capability) => {
+    event.preventDefault();
+    event.stopPropagation();
+    await setOverride(capabilityModel, { ...overrides, [capability]: caps[capability] !== true });
+  };
+  const resetInputCapabilities = async (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    await setOverride(capabilityModel, { text: null, vision: null, videoInput: null });
+  };
+
   return (
     <div className={`flex items-center gap-3 p-3 rounded-lg border ${borderColor} hover:bg-sidebar/50`}>
       <span
@@ -26,10 +47,49 @@ function CompatibleModelRow({ modelId, fullModel, copied, onCopy, onDeleteAlias,
         {testStatus === "ok" ? "check_circle" : testStatus === "error" ? "cancel" : "smart_toy"}
       </span>
       <div className="flex-1 min-w-0">
-        <p className="text-sm font-medium truncate">{modelId}</p>
-        <div className="flex items-center gap-1 mt-1">
-          <code className="text-xs text-text-muted font-mono bg-sidebar px-1.5 py-0.5 rounded">{fullModel}</code>
-          <div className="relative group/btn">
+      <p className="text-sm font-medium truncate">{modelId}</p>
+      <div className="flex items-center gap-1 mt-1">
+        <code className="text-xs text-text-muted font-mono bg-sidebar px-1.5 py-0.5 rounded">{fullModel}</code>
+        <span className="inline-flex items-center gap-0.5 ml-1" aria-label="Input capabilities">
+          {inputCapabilities.map((item) => {
+            const active = caps[item.key] === true;
+            const manual = overrides[item.key] === true || overrides[item.key] === false;
+            return (
+              <span
+                key={item.key}
+                role="button"
+                tabIndex={0}
+                title={`${item.label}: ${active ? "enabled" : "disabled"}${manual ? " (manual override)" : " (detected/default)"}. Click to toggle.`}
+                aria-label={`${item.label} ${active ? "enabled" : "disabled"}`}
+                onClick={(event) => toggleInputCapability(event, item.key)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") toggleInputCapability(event, item.key);
+                }}
+                className={`material-symbols-outlined leading-none rounded px-0.5 transition-colors ${active ? "text-primary bg-primary/12" : "text-text-muted/35"} ${manual ? "font-semibold" : ""}`}
+                style={{ fontSize: "12px", fontVariationSettings: active ? "'FILL' 1" : "'FILL' 0" }}
+              >
+                {item.icon}
+              </span>
+            );
+          })}
+          {hasOverride && (
+            <span
+              role="button"
+              tabIndex={0}
+              title="Reset input capabilities to detected/default"
+              aria-label="Reset input capabilities"
+              onClick={resetInputCapabilities}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") resetInputCapabilities(event);
+              }}
+              className="material-symbols-outlined leading-none text-text-muted hover:text-primary rounded px-0.5"
+              style={{ fontSize: "11px" }}
+            >
+              restart_alt
+            </span>
+          )}
+        </span>
+        <div className="relative group/btn">
             <button
               onClick={() => onCopy(fullModel, `model-${modelId}`)}
               className="p-0.5 hover:bg-sidebar rounded text-text-muted hover:text-primary"
@@ -200,6 +260,7 @@ export default function CompatibleModelsSection({ providerStorageAlias, provider
               key={`${source}-${providerStorageAlias}/${id}`}
               modelId={id}
               fullModel={`${providerDisplayAlias}/${id}`}
+              capabilityModel={`${providerStorageAlias}/${id}`}
               copied={copied}
               onCopy={onCopy}
               onDeleteAlias={() => source === "custom" ? onDeleteCustomModel(id) : onDeleteAlias(alias)}

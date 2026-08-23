@@ -43,7 +43,7 @@ export default function ModelSelectModal({
       return kinds.includes(kindFilter);
     });
   }, [activeProviders, kindFilter]);
-  const { getCaps } = useModelCaps();
+  const { getCaps, getOverride, setOverride } = useModelCaps();
   const [searchQuery, setSearchQuery] = useState("");
   const [combos, setCombos] = useState([]);
   const [providerNodes, setProviderNodes] = useState([]);
@@ -457,6 +457,80 @@ export default function ModelSelectModal({
     }
   };
 
+  const toggleInputCapability = async (event, model, capability) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const current = getCaps(model.value)?.[capability] === true;
+    const next = { ...getOverride(model.value), [capability]: !current };
+    try {
+      await setOverride(model.value, next);
+    } catch (error) {
+      console.error("Unable to update model input capability:", error);
+    }
+  };
+
+  const resetInputCapabilities = async (event, model) => {
+    event.preventDefault();
+    event.stopPropagation();
+    try {
+      await setOverride(model.value, { text: null, vision: null, videoInput: null });
+    } catch (error) {
+      console.error("Unable to reset model input capabilities:", error);
+    }
+  };
+
+  const inputCapabilityIcons = (model) => {
+    const caps = getCaps(model.value) || {};
+    const overrides = getOverride(model.value);
+    const items = [
+      { key: "text", icon: "text_fields", label: "Text input" },
+      { key: "vision", icon: "image", label: "Image input" },
+      { key: "videoInput", icon: "movie", label: "Video input" },
+    ];
+    const hasOverride = Object.values(overrides).some((value) => value === true || value === false);
+    return (
+      <span className="inline-flex items-center gap-0.5 ml-1" aria-label="Input capabilities">
+        {items.map((item) => {
+          const active = caps[item.key] === true;
+          const manual = overrides[item.key] === true || overrides[item.key] === false;
+          return (
+            <span
+              key={item.key}
+              role="button"
+              tabIndex={0}
+              title={`${item.label}: ${active ? "enabled" : "disabled"}${manual ? " (manual override)" : " (detected/default)"}. Click to toggle.`}
+              aria-label={`${item.label} ${active ? "enabled" : "disabled"}`}
+              onClick={(event) => toggleInputCapability(event, model, item.key)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") toggleInputCapability(event, model, item.key);
+              }}
+              className={`material-symbols-outlined leading-none rounded px-0.5 transition-colors ${active ? "text-primary" : "text-text-muted/35"} ${manual ? "ring-1 ring-primary/40" : ""}`}
+              style={{ fontSize: "12px" }}
+            >
+              {item.icon}
+            </span>
+          );
+        })}
+        {hasOverride && (
+          <span
+            role="button"
+            tabIndex={0}
+            title="Reset input capabilities to detected/default"
+            aria-label="Reset input capabilities"
+            onClick={(event) => resetInputCapabilities(event, model)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" || event.key === " ") resetInputCapabilities(event, model);
+            }}
+            className="material-symbols-outlined leading-none text-text-muted hover:text-primary rounded px-0.5"
+            style={{ fontSize: "11px" }}
+          >
+            restart_alt
+          </span>
+        )}
+      </span>
+    );
+  };
+
   return (
     <Modal
       isOpen={isOpen}
@@ -584,11 +658,13 @@ export default function ModelSelectModal({
                           {model.name}
                           <span className="text-[9px] opacity-60 font-normal">custom</span>
                           <CapacityBadges caps={getCaps(model.value)} />
+                          {inputCapabilityIcons(model)}
                         </>
                       ) : (
                         <>
                           {model.name}
                           <CapacityBadges caps={getCaps(model.value)} />
+                          {inputCapabilityIcons(model)}
                         </>
                       )}
                     </span>

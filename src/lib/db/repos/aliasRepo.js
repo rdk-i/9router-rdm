@@ -5,6 +5,7 @@ import { makeKv } from "../helpers/kvStore.js";
 const aliasKv = makeKv("modelAliases");
 const customKv = makeKv("customModels");
 const mitmKv = makeKv("mitmAlias");
+const modelCapabilitiesKv = makeKv("modelCapabilities");
 
 // modelAliases: key=alias, value=modelString
 export async function getModelAliases() {
@@ -30,14 +31,14 @@ export async function getCustomModels() {
 }
 
 // Atomic check-then-insert inside transaction to prevent duplicate races
-export async function addCustomModel({ providerAlias, id, type = "llm", name }) {
+export async function addCustomModel({ providerAlias, id, type = "llm", name, capabilities }) {
   const k = customKey(providerAlias, id, type);
   const db = await getAdapter();
   let added = false;
   db.transaction(() => {
     const row = db.get(`SELECT 1 FROM kv WHERE scope = 'customModels' AND key = ?`, [k]);
     if (row) return;
-    const value = stringifyJson({ providerAlias, id, type, name: name || id });
+    const value = stringifyJson({ providerAlias, id, type, name: name || id, ...(capabilities ? { capabilities } : {}) });
     db.run(`INSERT INTO kv(scope, key, value) VALUES('customModels', ?, ?)`, [k, value]);
     added = true;
   });
@@ -46,6 +47,18 @@ export async function addCustomModel({ providerAlias, id, type = "llm", name }) 
 
 export async function deleteCustomModel({ providerAlias, id, type = "llm" }) {
   await customKv.remove(customKey(providerAlias, id, type));
+}
+
+export async function getModelCapabilityOverrides() {
+  return await modelCapabilitiesKv.getAll();
+}
+
+export async function setModelCapabilityOverrides(providerAlias, id, overrides) {
+  await modelCapabilitiesKv.set(`${providerAlias}/${id}`, overrides || {});
+}
+
+export async function deleteModelCapabilityOverrides(providerAlias, id) {
+  await modelCapabilitiesKv.remove(`${providerAlias}/${id}`);
 }
 
 // mitmAlias: key=toolName, value=mappings object

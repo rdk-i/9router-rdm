@@ -17,7 +17,7 @@ export default function ModelRow({ model, fullModel, alias, copied, onCopy, test
     ? "#ef4444"
     : undefined;
 
-  const effectiveCaps = caps || getCaps(fullModel) || {};
+  const effectiveCaps = { ...(caps || {}), ...(getCaps(fullModel) || {}) };
   const overrides = getOverride(fullModel);
   const inputCapabilities = [
     { key: "text", icon: "text_fields", label: "Text input" },

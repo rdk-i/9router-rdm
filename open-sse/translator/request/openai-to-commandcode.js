@@ -14,6 +14,7 @@ import { FORMATS } from "../formats.js";
 import { randomUUID } from "crypto";
 import { ROLE, OPENAI_BLOCK } from "../schema/index.js";
 import { DEFAULT_MAX_TOKENS } from "../../config/runtimeConfig.js";
+import { parseDataUri } from "../concerns/image.js";
 
 function flattenText(content) {
   if (content == null) return "";
@@ -40,8 +41,20 @@ function toContentBlocks(content) {
       } else if (part && typeof part === "object") {
         if (part.type === OPENAI_BLOCK.TEXT && typeof part.text === "string") {
           blocks.push({ type: OPENAI_BLOCK.TEXT, text: part.text });
-        } else if (part.type === OPENAI_BLOCK.IMAGE_URL || part.type === OPENAI_BLOCK.IMAGE) {
-          blocks.push({ type: OPENAI_BLOCK.TEXT, text: "[image omitted]" });
+        } else if (part.type === OPENAI_BLOCK.IMAGE_URL) {
+          // OpenAI image_url: { url: "data:image/png;base64,..." }. HTTP(S) URLs are
+          // prefetched to base64 by prefetchRemoteImages (COMMANDCODE targets base64).
+          const url = typeof part.image_url === "string" ? part.image_url : part.image_url?.url;
+          const parsed = parseDataUri(url);
+          if (parsed) {
+            blocks.push({ type: "image", source: { type: "base64", media_type: parsed.mimeType, data: parsed.base64 } });
+          } else if (typeof url === "string" && (url.startsWith("http://") || url.startsWith("https://"))) {
+            // Remote URL not prefetched (edge case) — pass the URL so upstream decides.
+            blocks.push({ type: "image", source: { type: "url", url } });
+          }
+        } else if (part.type === OPENAI_BLOCK.IMAGE && part.source) {
+          // Already Claude-style { type:"image", source:{ type:"base64", media_type, data } }
+          blocks.push({ type: "image", source: part.source });
         } else if (typeof part.text === "string") {
           blocks.push({ type: OPENAI_BLOCK.TEXT, text: part.text });
         }

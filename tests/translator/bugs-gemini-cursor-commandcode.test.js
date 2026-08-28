@@ -62,9 +62,9 @@ describe("OpenAI → CommandCode", () => {
     expect(Object.keys(call.input).length, "arguments silently dropped to {}").toBeGreaterThan(0);
   });
 
-  // openai-to-commandcode.js:41-42 — image becomes "[image omitted]"
-  // KNOWN BUG
-  it.fails("image content is preserved", () => {
+  // openai-to-commandcode.js now forwards image_url data URI as a Claude-style
+  // image block (fixed). Previously it became "[image omitted]".
+  it("image content is preserved", () => {
     const out = O2CC({
       messages: [{ role: "user", content: [
         { type: "text", text: "look" },

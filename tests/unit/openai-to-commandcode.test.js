@@ -179,3 +179,44 @@ describe("openaiToCommandCodeRequest — tools schema conversion", () => {
     expect(out.params.tools).toBeUndefined();
   });
 });
+
+describe("openaiToCommandCodeRequest — image passthrough (vision)", () => {
+  it("converts OpenAI image_url data URI to Claude-style image block (NOT [image omitted])", () => {
+    const out = openaiToCommandCodeRequest(MODEL, {
+      messages: [{
+        role: "user",
+        content: [
+          { type: "text", text: "what color?" },
+          { type: "image_url", image_url: { url: "data:image/png;base64,QUJD" } },
+        ],
+      }],
+    }, true);
+
+    const u = out.params.messages[0];
+    const img = u.content.find((b) => b.type === "image");
+    expect(img).toBeDefined();
+    expect(img.source).toEqual({ type: "base64", media_type: "image/png", data: "QUJD" });
+    // text block preserved alongside image
+    const txt = u.content.find((b) => b.type === "text");
+    expect(txt.text).toBe("what color?");
+    // must NOT contain the old "[image omitted]" placeholder
+    expect(JSON.stringify(u.content)).not.toContain("[image omitted]");
+  });
+
+  it("passes through Claude-style image source blocks unchanged", () => {
+    const src = { type: "base64", media_type: "image/jpeg", data: "WUVT" };
+    const out = openaiToCommandCodeRequest(MODEL, {
+      messages: [{
+        role: "user",
+        content: [
+          { type: "image", source: src },
+          { type: "text", text: "desc" },
+        ],
+      }],
+    }, true);
+
+    const u = out.params.messages[0];
+    const img = u.content.find((b) => b.type === "image");
+    expect(img.source).toEqual(src);
+  });
+});

@@ -18,6 +18,8 @@ import { resolveZedModels } from "open-sse/shared/zedAuth.js";
 import { updateProviderCredentials } from "@/sse/services/tokenRefresh";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 import { capabilitiesFromServiceKind, getCapabilitiesForModel } from "open-sse/providers/capabilities.js";
+import { getModelCapabilityOverrides } from "@/lib/localDb";
+import { resolveEffectiveCapabilities } from "open-sse/providers/modelCapabilities.js";
 
 // Per-provider live model resolvers. Each receives a connection record and
 // returns { models: [{ id, name? }, ...] } | null on failure.
@@ -283,6 +285,25 @@ export async function buildModelsList(kindFilter, options = {}) {
   }
   const isDisabled = (alias, modelId) => Array.isArray(disabledByAlias[alias]) && disabledByAlias[alias].includes(modelId);
 
+  // /v1/models is consumed by clients such as OpenCode to construct their
+  // local model capability object. It must expose the same effective vision
+  // state as the chat runtime; otherwise a dashboard vision override is lost
+  // before the request reaches the translator.
+  let capabilityOverrides = {};
+  try {
+    capabilityOverrides = await getModelCapabilityOverrides();
+  } catch (e) {
+    console.log("Could not fetch model capability overrides");
+  }
+  const applyCapabilityOverride = (caps, providerIds, modelId) => {
+    const detected = caps || {};
+    for (const providerId of providerIds) {
+      const override = capabilityOverrides[`${providerId}/${modelId}`];
+      if (override) return resolveEffectiveCapabilities(detected, override);
+    }
+    return detected;
+  };
+
   const activeConnectionByProvider = new Map();
   for (const conn of connections) {
     if (!activeConnectionByProvider.has(conn.provider)) {
@@ -481,9 +502,14 @@ export async function buildModelsList(kindFilter, options = {}) {
         // { id, name } — no per-model capability data. Fall back to the same
         // pattern-matched capabilities the dashboard uses (useModelCaps.js) so
         // dynamically-discovered LLM models still surface vision/reasoning/search/tools.
-        const caps = liveCapabilitiesById.get(modelId)
+        const detectedCaps = liveCapabilitiesById.get(modelId)
           || capabilitiesFromServiceKind(customKind || liveKind)
           || (kind === LLM_KIND ? getCapabilitiesForModel(providerId, modelId) : null);
+        const caps = applyCapabilityOverride(
+          detectedCaps,
+          [outputAlias, staticAlias, providerId],
+          modelId,
+        );
         if (caps) model.capabilities = caps;
         // Token limits under the snake_case names the OpenAI/OpenRouter
         // convention uses. `capabilities.contextWindow` is camelCase and nested,

@@ -510,7 +510,36 @@ export async function buildModelsList(kindFilter, options = {}) {
           [outputAlias, staticAlias, providerId],
           modelId,
         );
-        if (caps) model.capabilities = caps;
+        if (caps) {
+          model.capabilities = caps;
+          // Clients such as OpenCode/OpenChamber build their pi-ai Model from
+          // a v2 "capabilities.input" *array* of modality strings, not the
+          // boolean-flag map 9router uses internally. When a runtime capability
+          // override marks a model vision-capable (modelCapabilities.vision=true),
+          // surface it in the array shape so the client sends the image instead
+          // of dropping it as "[image omitted: model has no vision support]".
+          const modalityKeys = ["text", "image", "audio", "video", "pdf"];
+          const inputModalities = modalityKeys.filter((key) => {
+            if (key === "text") return true;
+            if (key === "image") return caps.vision === true;
+            if (key === "audio") return caps.audioInput === true;
+            if (key === "video") return caps.videoInput === true;
+            return caps.pdf === true;
+          });
+          const outputModalities = modalityKeys.filter((key) => {
+            if (key === "text") return true;
+            if (key === "image") return caps.imageOutput === true;
+            if (key === "audio") return caps.audioOutput === true;
+            return false; // pdf/video output not modelled here
+          });
+          // Stable array shape (no accidental "undefined" entries).
+          model.modalities = {
+            input: inputModalities,
+            output: outputModalities,
+          };
+          // attachment reflects whether any non-text input modality is active.
+          model.attachment = inputModalities.some((k) => k !== "text");
+        }
         // Token limits under the snake_case names the OpenAI/OpenRouter
         // convention uses. `capabilities.contextWindow` is camelCase and nested,
         // so clients matching context_length find nothing, fall back to guessing

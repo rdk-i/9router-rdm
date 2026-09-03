@@ -71,6 +71,10 @@ function textFromContent(content) {
 }
 
 function isAgentTextRequest(body) {
+  // Tool-bearing requests must use the Cursor protobuf tool path. AgentService
+  // text mode has no way to declare or execute OpenChamber tools.
+  if (Array.isArray(body?.tools) && body.tools.length > 0) return false;
+
   // Many compatible clients always attach their built-in tool schemas, even
   // for a normal text turn. Cursor's retired ChatService rejects those
   // requests; AgentService can still answer the text turn, so ignore schemas

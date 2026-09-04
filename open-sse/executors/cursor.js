@@ -106,8 +106,15 @@ function buildAgentRunFrame(messages, model, tools = [], conversationId = null, 
     .filter(Boolean)
     .join("\n\n");
   const chatMessages = messages.filter((message) => message?.role !== "system");
-  const currentIndex = [...chatMessages].map((message) => message?.role).lastIndexOf("user");
-  const current = currentIndex >= 0 ? chatMessages[currentIndex] : chatMessages.at(-1);
+  const lastToolIndex = [...chatMessages].map((message) => message?.role).lastIndexOf("tool");
+  const lastUserIndex = [...chatMessages].map((message) => message?.role).lastIndexOf("user");
+  const toolContinuation = lastToolIndex > lastUserIndex;
+  const currentIndex = toolContinuation
+    ? lastToolIndex
+    : lastUserIndex;
+  const current = toolContinuation
+    ? { role: "user", content: "Continue after the tool result." }
+    : (currentIndex >= 0 ? chatMessages[currentIndex] : chatMessages.at(-1));
   const history = chatMessages
     .slice(0, currentIndex >= 0 ? currentIndex : -1)
     .map(encodeHistoryMessage)

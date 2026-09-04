@@ -89,14 +89,44 @@ function isAgentTextRequest(body) {
 
 function encodeHistoryMessage(message) {
   const content = textFromContent(message?.content);
-  if (!content) return null;
+  const toolCalls = Array.isArray(message?.tool_calls) ? message.tool_calls : [];
 
-  // ConversationHistoryMessage.user / .assistant -> repeated content -> text.
-  const text = agentString(1, content);
-  if (message.role === "assistant") {
-    return agentMessage(2, agentMessage(1, agentMessage(1, text)));
+  if (message?.role === "tool") {
+    const toolName = message.tool_name || message.name || "";
+    const toolContent = encodeField(1, WIRE_TYPE.LEN,
+      encodeField(1, WIRE_TYPE.LEN, content));
+    const tool = concatBuffers(
+      encodeField(1, WIRE_TYPE.LEN, message.tool_call_id || ""),
+      ...(toolName ? [encodeField(2, WIRE_TYPE.LEN, toolName)] : []),
+      encodeField(3, WIRE_TYPE.LEN, toolContent),
+      ...(message.is_error ? [encodeField(4, WIRE_TYPE.VARINT, 1)] : []),
+    );
+    return encodeField(3, WIRE_TYPE.LEN, tool);
   }
-  return agentMessage(1, agentMessage(1, agentMessage(1, text)));
+
+  const textContent = content
+    ? encodeField(1, WIRE_TYPE.LEN, encodeField(1, WIRE_TYPE.LEN, content))
+    : null;
+  if (message?.role === "assistant" && toolCalls.length) {
+    const toolContent = toolCalls.map((call) => encodeField(
+      4, WIRE_TYPE.LEN,
+      concatBuffers(
+        encodeField(1, WIRE_TYPE.LEN, call.id || ""),
+        encodeField(2, WIRE_TYPE.LEN, call.function?.name || call.name || ""),
+        encodeField(3, WIRE_TYPE.LEN, call.function?.arguments || "{}"),
+      ),
+    ));
+    const assistant = concatBuffers(
+      encodeField(1, WIRE_TYPE.LEN, concatBuffers(textContent || new Uint8Array(), ...toolContent)),
+    );
+    return encodeField(2, WIRE_TYPE.LEN, assistant);
+  }
+
+  if (!textContent) return null;
+  const wrapped = encodeField(1, WIRE_TYPE.LEN, textContent);
+  return message?.role === "assistant"
+    ? encodeField(2, WIRE_TYPE.LEN, wrapped)
+    : encodeField(1, WIRE_TYPE.LEN, wrapped);
 }
 
 function buildAgentRunFrame(messages, model, tools = [], conversationId = null, agentSessionId = null) {
@@ -116,7 +146,7 @@ function buildAgentRunFrame(messages, model, tools = [], conversationId = null, 
     ? { role: "user", content: "Continue after the tool result." }
     : (currentIndex >= 0 ? chatMessages[currentIndex] : chatMessages.at(-1));
   const history = chatMessages
-    .slice(0, currentIndex >= 0 ? currentIndex : -1)
+    .slice(0, toolContinuation ? currentIndex + 1 : (currentIndex >= 0 ? currentIndex : -1))
     .map(encodeHistoryMessage)
     .filter(Boolean);
   const userText = textFromContent(current?.content) || "Continue.";
@@ -541,17 +571,6 @@ export class CursorExecutor extends BaseExecutor {
       const conversationId = body.conversation_id || body.conversationId || body.metadata?.conversation_id || null;
       const agentSessionId = body.agent_session_id || body.agentSessionId || body.metadata?.agent_session_id || null;
       session.write(buildAgentRunFrame(body.messages || [], model, body.tools || [], conversationId, agentSessionId));
-
-      // A tool result arrives on the next OpenAI request. Cursor expects it as
-      // an ExecClientMessage, not as ordinary conversation text. The numeric
-      // exec id is retained in the tool-call id when Cursor provides it.
-      const lastToolResult = [...(body.messages || [])].reverse().find((message) => message?.role === "tool");
-      if (lastToolResult) {
-        const rawId = String(lastToolResult.tool_call_id || "");
-        const execId = rawId.match(/(?:^|:)exec[-_](\d+)$/i)?.[1] || rawId.match(/^\d+$/)?.[0] || agentToolExecIds.get(rawId) || "";
-        session.write(encodeAgentToolResult(execId, lastToolResult.content, false));
-        if (rawId) agentToolExecIds.delete(rawId);
-      }
     } catch (error) {
       throw new Error(`Cursor AgentService request failed: ${error.message}`);
     }

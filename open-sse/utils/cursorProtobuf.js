@@ -802,12 +802,16 @@ export function encodeAgentToolResult(execId, result, isError = false) {
 
 function decodeStructValue(data) {
   const fields = decodeMessage(data);
-  if (fields.has(3)) return Number(new DataView(fields.get(3)[0].value.buffer).getFloat64(0, true));
-  if (fields.has(4)) return utf8(fields.get(4)[0].value);
-  if (fields.has(5)) return fields.get(5)[0].value !== 0;
-  if (fields.has(6)) return fields.get(6)[0].value;
-  if (fields.has(2)) return null;
-  if (fields.has(1)) return decodeStruct(fields.get(1)[0].value);
+  if (fields.has(1)) return null;
+  if (fields.has(2)) {
+    const bytes = fields.get(2)[0].value;
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    return view.getFloat64(0, true);
+  }
+  if (fields.has(3)) return utf8(fields.get(3)[0].value);
+  if (fields.has(4)) return fields.get(4)[0].value !== 0;
+  if (fields.has(5)) return decodeStruct(fields.get(5)[0].value);
+  if (fields.has(6)) return (decodeMessage(fields.get(6)[0].value).get(1) || []).map((entry) => decodeStructValue(entry.value));
   return null;
 }
 
@@ -837,6 +841,28 @@ export function decodeAgentMcpArgs(data) {
     tool_name: fields.has(5) ? utf8(fields.get(5)[0].value) : "",
     arguments: JSON.stringify(args),
   };
+}
+
+export function decodeAgentPartialMcpToolCall(data) {
+  const partial = decodeMessage(data);
+  const callId = partial.has(1) ? utf8(partial.get(1)[0].value) : "";
+  const argsDelta = partial.has(3) ? utf8(partial.get(3)[0].value) : "";
+  let name = "";
+  let toolCallId = callId;
+  let argumentsText = argsDelta;
+  if (partial.has(2)) {
+    const toolCall = decodeMessage(partial.get(2)[0].value);
+    if (toolCall.has(57)) toolCallId = utf8(toolCall.get(57)[0].value) || toolCallId;
+    if (toolCall.has(15)) {
+      const mcp = decodeMessage(toolCall.get(15)[0].value);
+      if (mcp.has(1)) {
+        const args = decodeAgentMcpArgs(mcp.get(1)[0].value);
+        name = args.tool_name || args.name;
+        argumentsText = args.arguments || argumentsText;
+      }
+    }
+  }
+  return { call_id: callId, tool_call_id: toolCallId, name, arguments: argumentsText || "{}" };
 }
 
 // ==================== RESPONSE PARSING ====================

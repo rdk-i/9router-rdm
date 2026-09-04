@@ -10,7 +10,8 @@ import {
   extractTextFromResponse,
   encodeAgentMcpTools,
   encodeAgentToolResult,
-  decodeAgentMcpArgs
+  decodeAgentMcpArgs,
+  decodeAgentPartialMcpToolCall
 } from "../utils/cursorProtobuf.js";
 import { buildCursorHeaders } from "../utils/cursorChecksum.js";
 import { estimateUsage } from "../utils/usageTracking.js";
@@ -586,6 +587,7 @@ export class CursorExecutor extends BaseExecutor {
     let pending = Buffer.alloc(0);
     let finished = false;
     const toolCalls = [];
+    const partialToolCalls = new Map();
 
     const consume = async (onEvent) => {
       try {
@@ -602,6 +604,28 @@ export class CursorExecutor extends BaseExecutor {
             // agent.v1.AgentServerMessage.interaction_update
             if (serverMessage.has(1)) {
               const update = decodeMessage(serverMessage.get(1)[0].value);
+              if (update.has(7)) {
+                const partial = decodeAgentPartialMcpToolCall(update.get(7)[0].value);
+                const previous = partialToolCalls.get(partial.tool_call_id) || { arguments: "" };
+                const merged = {
+                  ...partial,
+                  arguments: partial.arguments === "{}" && previous.arguments ? previous.arguments : partial.arguments,
+                };
+                partialToolCalls.set(partial.tool_call_id, merged);
+                if (merged.name) {
+                  const toolCall = {
+                    index: toolCalls.length,
+                    id: merged.tool_call_id,
+                    type: "function",
+                    function: { name: merged.name, arguments: merged.arguments || "{}" },
+                  };
+                  toolCalls.push(toolCall);
+                  agentToolExecIds.set(toolCall.id, merged.tool_call_id);
+                  finished = true;
+                  onEvent({ type: "tool_call", value: toolCall });
+                  onEvent({ type: "done", toolCalls: true });
+                }
+              }
               if (update.has(1)) {
                 const textDelta = extractAgentString(decodeMessage(update.get(1)[0].value), 1);
                 if (textDelta) onEvent({ type: "text", value: textDelta });

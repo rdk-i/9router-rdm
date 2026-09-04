@@ -49,6 +49,7 @@ const COMPRESS_FLAG = {
 const AGENT_RUN_PATH = "/agent.v1.AgentService/Run";
 const PROTOBUF_LEN = 2;
 const PROTOBUF_VARINT = 0;
+const WIRE_TYPE = { VARINT: PROTOBUF_VARINT, LEN: PROTOBUF_LEN };
 
 function concatBuffers(...parts) {
   const length = parts.reduce((total, part) => total + part.length, 0);

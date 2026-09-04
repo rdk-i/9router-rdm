@@ -636,19 +636,19 @@ export class CursorExecutor extends BaseExecutor {
                   : String(execRequest.get(1)?.[0]?.value || "");
                 const args = decodeAgentMcpArgs(execRequest.get(11)[0].value);
                 const toolCall = {
+                  index: toolCalls.length,
                   id: args.tool_call_id || `cursor_exec_${execId}`,
                   type: "function",
                   function: {
                     name: args.tool_name || args.name,
                     arguments: args.arguments || "{}",
                   },
-                  exec_id: execId,
                 };
                 toolCalls.push(toolCall);
                 agentToolExecIds.set(toolCall.id, execId);
                 finished = true;
                 onEvent({ type: "tool_call", value: toolCall });
-                onEvent({ type: "done" });
+                onEvent({ type: "done", toolCalls: true });
               } else {
                 // Every other ExecServerMessage variant is an editor-backed tool
                 // (shell, read, write, …) that 9router cannot service. Fail the
@@ -724,7 +724,7 @@ export class CursorExecutor extends BaseExecutor {
             controller.enqueue(encoder.encode(SSE_DONE));
             controller.close();
           } else if (event.type === "done") {
-            controller.enqueue(encoder.encode(chatChunkSse({ id: responseId, created, model, delta: {}, finishReason: "stop" })));
+            controller.enqueue(encoder.encode(chatChunkSse({ id: responseId, created, model, delta: {}, finishReason: event.toolCalls ? "tool_calls" : "stop" })));
             controller.enqueue(encoder.encode(SSE_DONE));
             controller.close();
           }

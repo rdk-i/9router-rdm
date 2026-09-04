@@ -173,6 +173,37 @@ const FIELD = {
   THINKING_TEXT: 1
 };
 
+// agent.v1 AgentService wire fields. These are kept separate from the legacy
+// StreamUnifiedChat schema above because both services use field number 1 for
+// their outer request but have completely different nested messages.
+const AGENT_FIELD = {
+  CLIENT_RUN_REQUEST: 1,
+  CLIENT_EXEC_MESSAGE: 2,
+  CLIENT_KV_MESSAGE: 3,
+  CLIENT_HEARTBEAT: 7,
+  RUN_CONVERSATION_STATE: 1,
+  RUN_ACTION: 2,
+  RUN_REQUESTED_MODEL: 9,
+  RUN_MCP_TOOLS: 4,
+  RUN_CONVERSATION_ID: 5,
+  RUN_CUSTOM_SYSTEM_PROMPT: 8,
+  RUN_AGENT_SESSION_ID: 26,
+  MCP_TOOL_NAME: 1,
+  MCP_TOOL_DESCRIPTION: 2,
+  MCP_TOOL_INPUT_SCHEMA_JSON: 6,
+  MCP_TOOL_PROVIDER: 4,
+  MCP_TOOL_TOOL_NAME: 5,
+  EXEC_ID: 1,
+  EXEC_MCP_RESULT: 11,
+  EXEC_REQUEST_CONTEXT_RESULT: 10,
+  MCP_RESULT_SUCCESS: 1,
+  MCP_RESULT_ERROR: 2,
+  MCP_SUCCESS_CONTENT: 1,
+  MCP_SUCCESS_IS_ERROR: 2,
+  MCP_CONTENT_TEXT: 1,
+  MCP_ERROR_TEXT: 1,
+};
+
 // Known response field numbers — used to detect unknown fields from protocol updates
 const KNOWN_RESPONSE_FIELDS = new Set([
   FIELD.TOOL_CALL,
@@ -726,6 +757,86 @@ export function decodeMessage(data) {
   }
 
   return fields;
+}
+
+function utf8(value) {
+  return new TextDecoder().decode(value || new Uint8Array());
+}
+
+function encodeAgentMcpTool(tool) {
+  const fn = tool?.function || tool || {};
+  const name = fn.name || tool?.name || "tool";
+  const description = fn.description || tool?.description || "";
+  const schema = fn.parameters || tool?.input_schema || {};
+  return concatArrays(
+    encodeField(1, WIRE_TYPE.LEN, `mcp_custom_${name}`),
+    encodeField(2, WIRE_TYPE.LEN, description),
+    encodeField(4, WIRE_TYPE.LEN, "custom"),
+    encodeField(5, WIRE_TYPE.LEN, name),
+    encodeField(6, WIRE_TYPE.LEN, JSON.stringify(schema)),
+  );
+}
+
+export function encodeAgentMcpTools(tools = []) {
+  return concatArrays(...tools.map((tool) => encodeField(
+    1, WIRE_TYPE.LEN, encodeAgentMcpTool(tool)
+  )));
+}
+
+export function encodeAgentToolResult(execId, result, isError = false) {
+  const text = typeof result === "string" ? result : JSON.stringify(result ?? "");
+  const content = concatArrays(
+    encodeField(1, WIRE_TYPE.LEN, encodeField(1, WIRE_TYPE.LEN, text)),
+    ...(isError ? [encodeField(2, WIRE_TYPE.VARINT, 1)] : []),
+  );
+  const mcpResult = isError
+    ? encodeField(2, WIRE_TYPE.LEN, encodeField(1, WIRE_TYPE.LEN, text))
+    : encodeField(1, WIRE_TYPE.LEN, content);
+  const execMessage = concatArrays(
+    encodeField(1, WIRE_TYPE.VARINT, 0),
+    encodeField(15, WIRE_TYPE.LEN, String(execId || "")),
+    encodeField(11, WIRE_TYPE.LEN, mcpResult),
+  );
+  return wrapConnectRPCFrame(encodeField(2, WIRE_TYPE.LEN, execMessage));
+}
+
+function decodeStructValue(data) {
+  const fields = decodeMessage(data);
+  if (fields.has(3)) return Number(new DataView(fields.get(3)[0].value.buffer).getFloat64(0, true));
+  if (fields.has(4)) return utf8(fields.get(4)[0].value);
+  if (fields.has(5)) return fields.get(5)[0].value !== 0;
+  if (fields.has(6)) return fields.get(6)[0].value;
+  if (fields.has(2)) return null;
+  if (fields.has(1)) return decodeStruct(fields.get(1)[0].value);
+  return null;
+}
+
+function decodeStruct(data) {
+  const out = {};
+  for (const entry of decodeMessage(data).get(1) || []) {
+    const pair = decodeMessage(entry.value);
+    const key = pair.has(1) ? utf8(pair.get(1)[0].value) : "";
+    const value = pair.has(2) ? decodeStructValue(pair.get(2)[0].value) : null;
+    if (key) out[key] = value;
+  }
+  return out;
+}
+
+export function decodeAgentMcpArgs(data) {
+  const fields = decodeMessage(data);
+  const args = {};
+  for (const entry of fields.get(2) || []) {
+    const pair = decodeMessage(entry.value);
+    const key = pair.has(1) ? utf8(pair.get(1)[0].value) : "";
+    if (key && pair.has(2)) args[key] = decodeStructValue(pair.get(2)[0].value);
+  }
+  return {
+    name: fields.has(1) ? utf8(fields.get(1)[0].value) : "",
+    tool_call_id: fields.has(3) ? utf8(fields.get(3)[0].value) : "",
+    provider_identifier: fields.has(4) ? utf8(fields.get(4)[0].value) : "custom",
+    tool_name: fields.has(5) ? utf8(fields.get(5)[0].value) : "",
+    arguments: JSON.stringify(args),
+  };
 }
 
 // ==================== RESPONSE PARSING ====================

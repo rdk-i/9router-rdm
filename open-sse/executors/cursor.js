@@ -7,7 +7,10 @@ import {
   wrapConnectRPCFrame,
   decodeMessage,
   parseConnectRPCFrame,
-  extractTextFromResponse
+  extractTextFromResponse,
+  encodeAgentMcpTools,
+  encodeAgentToolResult,
+  decodeAgentMcpArgs
 } from "../utils/cursorProtobuf.js";
 import { buildCursorHeaders } from "../utils/cursorChecksum.js";
 import { estimateUsage } from "../utils/usageTracking.js";
@@ -71,19 +74,15 @@ function textFromContent(content) {
 }
 
 function isAgentTextRequest(body) {
-  // Tool-bearing requests must use the Cursor protobuf tool path. AgentService
-  // text mode has no way to declare or execute OpenChamber tools.
-  if (Array.isArray(body?.tools) && body.tools.length > 0) return false;
+  // AgentService is the only Cursor path that can advertise MCP tools.
+  if (Array.isArray(body?.tools) && body.tools.length > 0) return true;
 
-  // Many compatible clients always attach their built-in tool schemas, even
-  // for a normal text turn. Cursor's retired ChatService rejects those
-  // requests; AgentService can still answer the text turn, so ignore schemas
-  // here. A real tool-call/result conversation is kept on the legacy path
-  // until its AgentService tool protocol is implemented.
+  // Follow-up requests carry the assistant tool call and the tool result.
+  if (Array.isArray(body?.messages) && body.messages.some((message) => message?.tool_calls?.length || message?.role === "tool")) return true;
+
   return Array.isArray(body?.messages) && body.messages.every((message) => {
-    if (message?.tool_calls?.length || message?.role === "tool") return false;
     return typeof message?.content === "string"
-      || Array.isArray(message?.content) && message.content.every((part) => part?.type === "text");
+      || Array.isArray(message?.content) && message?.content.every((part) => part?.type === "text");
   });
 }
 
@@ -99,7 +98,7 @@ function encodeHistoryMessage(message) {
   return agentMessage(1, agentMessage(1, agentMessage(1, text)));
 }
 
-function buildAgentRunFrame(messages, model) {
+function buildAgentRunFrame(messages, model, tools = [], conversationId = null, agentSessionId = null) {
   const system = messages
     .filter((message) => message?.role === "system")
     .map((message) => textFromContent(message.content))
@@ -133,6 +132,9 @@ function buildAgentRunFrame(messages, model) {
     agentMessage(1, new Uint8Array()),
     agentMessage(2, conversationAction),
     ...(system ? [agentString(8, system)] : []),
+    ...(tools.length ? [agentMessage(4, encodeAgentMcpTools(tools))] : []),
+    ...(conversationId ? [agentString(5, conversationId)] : []),
+    ...(agentSessionId ? [agentString(26, agentSessionId)] : []),
     agentMessage(9, requestedModel),
   );
 
@@ -168,6 +170,37 @@ function createRequestContextResponse() {
   const requestContextResult = agentMessage(1, requestContextSuccess);
   const execClientMessage = agentMessage(10, requestContextResult);
   return wrapConnectRPCFrame(agentMessage(2, execClientMessage));
+}
+
+function createAgentHeartbeatFrame() {
+  return wrapConnectRPCFrame(agentMessage(7, new Uint8Array()));
+}
+
+const agentKv = new Map();
+const agentToolExecIds = new Map();
+
+function createKvResponse(serverMessage) {
+  const id = serverMessage.get(1)?.[0]?.value || 0;
+  let payload;
+  if (serverMessage.has(2)) {
+    const args = decodeMessage(serverMessage.get(2)[0].value);
+    const blobId = Buffer.from(args.get(1)?.[0]?.value || []).toString("hex");
+    const blob = agentKv.get(blobId);
+    const getResult = blob ? encodeField(1, PROTOBUF_LEN, blob) : new Uint8Array();
+    payload = agentMessage(2, getResult);
+  } else if (serverMessage.has(3)) {
+    const args = decodeMessage(serverMessage.get(3)[0].value);
+    const blobId = Buffer.from(args.get(1)?.[0]?.value || []).toString("hex");
+    const blob = args.get(2)?.[0]?.value;
+    if (blobId && blob) agentKv.set(blobId, blob);
+    payload = agentMessage(3, new Uint8Array());
+  } else {
+    payload = agentMessage(2, new Uint8Array());
+  }
+  return wrapConnectRPCFrame(agentMessage(3, concatBuffers(
+    encodeField(1, PROTOBUF_VARINT, id),
+    payload,
+  )));
 }
 
 const CURSOR_STREAM_DEBUG = process.env.CURSOR_STREAM_DEBUG === "1";
@@ -497,7 +530,20 @@ export class CursorExecutor extends BaseExecutor {
     let session;
     try {
       session = this.openAgentHttp2Stream(url, headers, requestController.signal);
-      session.write(buildAgentRunFrame(body.messages || [], model));
+      const conversationId = body.conversation_id || body.conversationId || body.metadata?.conversation_id || null;
+      const agentSessionId = body.agent_session_id || body.agentSessionId || body.metadata?.agent_session_id || null;
+      session.write(buildAgentRunFrame(body.messages || [], model, body.tools || [], conversationId, agentSessionId));
+
+      // A tool result arrives on the next OpenAI request. Cursor expects it as
+      // an ExecClientMessage, not as ordinary conversation text. The numeric
+      // exec id is retained in the tool-call id when Cursor provides it.
+      const lastToolResult = [...(body.messages || [])].reverse().find((message) => message?.role === "tool");
+      if (lastToolResult) {
+        const rawId = String(lastToolResult.tool_call_id || "");
+        const execId = rawId.match(/(?:^|:)exec[-_](\d+)$/i)?.[1] || rawId.match(/^\d+$/)?.[0] || agentToolExecIds.get(rawId) || "";
+        session.write(encodeAgentToolResult(execId, lastToolResult.content, false));
+        if (rawId) agentToolExecIds.delete(rawId);
+      }
     } catch (error) {
       throw new Error(`Cursor AgentService request failed: ${error.message}`);
     }
@@ -539,6 +585,7 @@ export class CursorExecutor extends BaseExecutor {
     const created = Math.floor(Date.now() / 1000);
     let pending = Buffer.alloc(0);
     let finished = false;
+    const toolCalls = [];
 
     const consume = async (onEvent) => {
       try {
@@ -568,6 +615,13 @@ export class CursorExecutor extends BaseExecutor {
                 finished = true;
                 onEvent({ type: "done" });
               }
+              if (update.has(13)) session.write(createAgentHeartbeatFrame());
+            }
+
+            // AgentService KV messages carry conversation blobs. Keep a small
+            // process-local cache and answer requests without persisting prompts.
+            if (serverMessage.has(4)) {
+              session.write(createKvResponse(decodeMessage(serverMessage.get(4)[0].value)));
             }
 
             // AgentService requests IDE context before producing a response.
@@ -576,6 +630,25 @@ export class CursorExecutor extends BaseExecutor {
               const execRequest = decodeMessage(serverMessage.get(2)[0].value);
               if (execRequest.has(10)) {
                 session.write(createRequestContextResponse());
+              } else if (execRequest.has(11)) {
+                const execId = execRequest.get(15)?.[0]?.value
+                  ? new TextDecoder().decode(execRequest.get(15)[0].value)
+                  : String(execRequest.get(1)?.[0]?.value || "");
+                const args = decodeAgentMcpArgs(execRequest.get(11)[0].value);
+                const toolCall = {
+                  id: args.tool_call_id || `cursor_exec_${execId}`,
+                  type: "function",
+                  function: {
+                    name: args.tool_name || args.name,
+                    arguments: args.arguments || "{}",
+                  },
+                  exec_id: execId,
+                };
+                toolCalls.push(toolCall);
+                agentToolExecIds.set(toolCall.id, execId);
+                finished = true;
+                onEvent({ type: "tool_call", value: toolCall });
+                onEvent({ type: "done" });
               } else {
                 // Every other ExecServerMessage variant is an editor-backed tool
                 // (shell, read, write, …) that 9router cannot service. Fail the
@@ -597,10 +670,12 @@ export class CursorExecutor extends BaseExecutor {
     if (stream === false) {
       let content = "";
       let reasoning = "";
+      let responseToolCalls = [];
       let agentError = null;
       await consume((event) => {
         if (event.type === "text") content += event.value;
         else if (event.type === "thinking") reasoning += event.value;
+        else if (event.type === "tool_call") responseToolCalls.push(event.value);
         else if (event.type === "error") agentError = event.value;
       });
       if (agentError) {
@@ -621,7 +696,7 @@ export class CursorExecutor extends BaseExecutor {
           object: "chat.completion",
           created,
           model,
-          choices: [{ index: 0, message: { role: "assistant", content: content || null, ...(reasoning ? { reasoning_content: reasoning } : {}) }, finish_reason: "stop" }],
+          choices: [{ index: 0, message: { role: "assistant", content: content || null, ...(reasoning ? { reasoning_content: reasoning } : {}), ...(responseToolCalls.length ? { tool_calls: responseToolCalls } : {}) }, finish_reason: responseToolCalls.length ? "tool_calls" : "stop" }],
           usage: estimateUsage(body, content.length, FORMATS.OPENAI),
         }), { headers: { "Content-Type": "application/json" } }),
         url,
@@ -639,6 +714,8 @@ export class CursorExecutor extends BaseExecutor {
             controller.enqueue(encoder.encode(chatChunkSse({ id: responseId, created, model, delta: { content: event.value } })));
           } else if (event.type === "thinking") {
             controller.enqueue(encoder.encode(chatChunkSse({ id: responseId, created, model, delta: { reasoning_content: event.value } })));
+          } else if (event.type === "tool_call") {
+            controller.enqueue(encoder.encode(chatChunkSse({ id: responseId, created, model, delta: { tool_calls: [event.value] } })));
           } else if (event.type === "error") {
             // An SSE error frame, not a content delta: a protocol failure must not
             // be rendered to the user as the assistant's reply, and downstream
